@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Etiquette example: equipment ID tag, 3in x 1in — convention 0.2
+     kitchen sink: layers, composed field, lookup map, rest source,
+     serial, text fit. Dry-run it:
+       etiq resolve examples/equipment-tag.svg (add: set AssetName=TEST-PC) -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="3in" height="1in" viewBox="0 0 3000 1000">
+  <metadata>
+    <etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+      <etiq:field name="AssetName" source="prompt" caption="Asset name:" required="true"/>
+      <etiq:field name="Location"  source="rest" connection="glpi"
+                  query="search/Computer" pick="data[0].location"
+                  on-fail="use:UNKNOWN" if-empty="UNKNOWN"/>
+      <etiq:field name="Seq"       source="serial" counter="EQUIP" format="0000"/>
+      <etiq:field name="Date"      source="auto" value="date:yyMM"/>
+      <etiq:field name="TagId"     source="compose">
+        <etiq:seg value="EQ-"/>
+        <etiq:seg ref="Location" map="Sites" default="XX"/>
+        <etiq:seg value="-"/>
+        <etiq:seg ref="Date"/>
+        <etiq:seg value="-"/>
+        <etiq:seg ref="Seq"/>
+      </etiq:field>
+      <etiq:map name="Sites">
+        <etiq:when from="SPRINGFIELD" to="SP"/>
+        <etiq:when prefix="MONT"      to="MO"/>
+        <etiq:when from="UNKNOWN"  to="XX"/>
+      </etiq:map>
+    </etiq:label>
+  </metadata>
+
+  <g data-layer="Frame" data-locked="true">
+    <rect x="20" y="20" width="2960" height="960" fill="none" stroke="black" stroke-width="15"/>
+    <line x1="20" y1="700" x2="2080" y2="700" stroke="black" stroke-width="8"/>
+  </g>
+
+  <g data-layer="Fields">
+    <text x="80" y="330" font-family="Arial" font-size="220" font-weight="bold"
+          data-field="AssetName" data-width="1900" data-overflow="shrink">SAMPLE-PC</text>
+    <text x="80" y="620" font-family="Arial" font-size="180"
+          data-field="TagId" data-width="1900" data-overflow="shrink">EQ-CH-2608-0001</text>
+    <text x="80" y="920" font-family="Arial" font-size="140"
+          data-field="Location">SPRINGFIELD</text>
+    <rect x="2150" y="80" width="760" height="760"
+          data-barcode="qr" data-field="TagId" data-module-mils="15"/>
+  </g>
+
+  <g data-layer="Guides" data-print="false" display="none">
+    <text x="80" y="80" font-family="Arial" font-size="60">keep 20-mil quiet zone around QR</text>
+  </g>
+</svg>

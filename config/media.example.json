@@ -1,0 +1,5 @@
+[
+  { "name": "6x4 die-cut",  "kind": "diecut",     "widthMils": 6000, "heightMils": 4000 },
+  { "name": "4x6.5 tag",    "kind": "diecut",     "widthMils": 4000, "heightMils": 6500 },
+  { "name": "18mm TZe tape","kind": "continuous", "widthMils": 708,  "minLenMils": 200, "maxLenMils": 39000 }
+]

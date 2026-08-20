@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Etiq.Editor</RootNamespace>
+    <AssemblyName>etiqedit</AssemblyName>
+    <!-- bump per release; Check for Updates compares this against the
+         latest GitHub release tag (vX.Y.Z) -->
+    <Version>0.5.0</Version>
+    <!-- lets the shell compile-check on non-Windows build agents;
+         harmless on Windows -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- Deployment: dotnet publish -c Release -r win-x64
+         -p:PublishSingleFile=true (self-contained switch as usual) -->
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- exe/taskbar icon; MainForm extracts it for the window icon too -->
+    <ApplicationIcon>..\..\assets\etiq.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- wordmark shown in Help → About -->
+    <EmbeddedResource Include="..\..\assets\logo.png" LogicalName="etiq.logo.png" />
+    <!-- square icon: the data-logo="etiq" QR center overlay -->
+    <EmbeddedResource Include="..\..\assets\icon.png" LogicalName="etiq.icon.png" />
+    <!-- shipped metadata templates (Insert Template in the F4 dialog) -->
+    <None Include="..\..\snippets\*.snippet.xml"
+          CopyToOutputDirectory="PreserveNewest"
+          Link="snippets\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Etiq.Core\Etiq.Core.csproj" />
+    <ProjectReference Include="..\Etiq.Editor.Core\Etiq.Editor.Core.csproj" />
+  </ItemGroup>
+
+</Project>

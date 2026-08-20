@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Etiq.Editor.Core</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Headless editor core: document model, undo/redo, hit-testing,
+       snapping. Deliberately NO WinForms/GDI dependency so it unit-tests
+       cross-platform; the WinForms shell (Etiq.Editor, net8.0-windows)
+       will reference this. Same no-NuGet rule as the rest of the repo. -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\Etiq.Core\Etiq.Core.csproj" />
+  </ItemGroup>
+
+</Project>

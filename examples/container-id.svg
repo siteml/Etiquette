@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Etiquette example: Container I.D. label, 6in x 4in.
+     Field set mirrors the labelprint reference app (Epicor BAQ job row). -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="6in" height="4in" viewBox="0 0 576 384">
+  <metadata>
+    <etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+      <etiq:field name="JobNum"   source="prompt" caption="Job Number:" mask=""/>
+      <etiq:field name="PartNo"   source="epicor" column="JobAsmbl_PartNum"/>
+      <etiq:field name="Customer" source="epicor" column="JobAsmbl_Description"/>
+      <etiq:field name="Rev"      source="epicor" column="JobAsmbl_RevisionNum"/>
+      <etiq:field name="Qty"      source="prompt" caption="Piece Count (PCS):" mask="99999"/>
+      <etiq:field name="Serial"   source="serial" counter="ACME" format="000000" increment="1"/>
+      <etiq:field name="Date"     source="auto"   value="date:dd-MMM-yyyy"/>
+      <etiq:field name="Address"  source="fixed"  value="100 EXAMPLE AVE, SPRINGFIELD, IL 62701"/>
+    </etiq:label>
+  </metadata>
+
+  <!-- static frame -->
+  <rect x="4" y="4" width="568" height="376" fill="none" stroke="black" stroke-width="2"/>
+  <line x1="4" y1="96" x2="572" y2="96" stroke="black" stroke-width="1"/>
+  <text x="16" y="28" font-family="Arial" font-size="14" font-weight="bold">CONTAINER I.D.</text>
+  <text x="16" y="88" font-family="Arial" font-size="10" data-field="Address">100 EXAMPLE AVE, SPRINGFIELD, IL 62701</text>
+
+  <!-- dynamic text -->
+  <text x="16"  y="140" font-family="Arial" font-size="12">PART NO (P)</text>
+  <text x="140" y="140" font-family="Arial" font-size="22" font-weight="bold"
+        data-field="PartNo">SAMPLE-PART-123</text>
+  <text x="16"  y="180" font-family="Arial" font-size="12">CUSTOMER</text>
+  <text x="140" y="180" font-family="Arial" font-size="16"
+        data-field="Customer" data-transform="upper,trim">Sample Customer</text>
+  <text x="16"  y="220" font-family="Arial" font-size="12">QTY (Q)</text>
+  <text x="140" y="220" font-family="Arial" font-size="22" font-weight="bold"
+        data-field="Qty" data-format="number:0">500</text>
+  <text x="360" y="220" font-family="Arial" font-size="12">DATE</text>
+  <text x="420" y="220" font-family="Arial" font-size="14"
+        data-field="Date">01-JAN-2026</text>
+  <text x="360" y="140" font-family="Arial" font-size="12">REV</text>
+  <text x="420" y="140" font-family="Arial" font-size="14" data-field="Rev">B</text>
+
+  <!-- barcodes -->
+  <rect x="140" y="240" width="300" height="56"
+        data-barcode="code128" data-field="Serial" data-hri="below"
+        data-module-mils="13"/>
+  <text x="16" y="272" font-family="Arial" font-size="12">SERIAL (3S)</text>
+  <rect x="460" y="240" width="96" height="96"
+        data-barcode="qr" data-field="JobNum"/>
+</svg>

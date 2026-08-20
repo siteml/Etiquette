@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Etiq.Core</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Planned package references (add as the phases land):
+       Svg.Skia        - SVG rendering (print engine)
+       ZXing.Net       - barcode generation
+  -->
+
+</Project>

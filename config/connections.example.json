@@ -1,0 +1,14 @@
+[
+  {
+    "name": "glpi",
+    "kind": "glpi",
+    "baseUrl": "https://glpi.example.local/apirest.php/",
+    "appTokenSecret": "dpapi:PASTE-ENCRYPTED-APP-TOKEN",
+    "userTokenSecret": "dpapi:PASTE-ENCRYPTED-USER-TOKEN"
+  },
+  {
+    "name": "example-anon",
+    "kind": "none",
+    "baseUrl": "https://api.example.local/v1/"
+  }
+]

@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# NOTE: this repository is built PER PROJECT, never `dotnet build Etiquette.sln`
+# in a way that assumes every project is present. The BTW import module lives in
+# the private sibling repo `etiquette-btw` and is absent in a public checkout
+# (see PROVENANCE.md); a solution-wide build would fail on the missing project.
+
+jobs:
+  test:
+    name: tests + cross-platform libs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build core libraries
+        run: |
+          dotnet build src/Etiq.Core        --configuration Release
+          dotnet build src/Etiq.Editor.Core --configuration Release
+          dotnet build src/etiq             --configuration Release
+
+      # the suite is a plain console runner; exit code = failure count
+      - name: Run tests
+        run: dotnet run --project tests/Etiq.Tests --configuration Release
+
+  designer:
+    name: designer (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build etiqedit
+        run: dotnet build src/Etiq.Editor --configuration Release

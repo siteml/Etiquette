@@ -1,0 +1,50 @@
+# label corpora and outputs may contain customer data - never commit
+*.btw
+*.BTW
+previews/
+gallery.pdf
+census.csv
+*.zip
+
+# build artifacts
+*.exe
+engine/bin/
+__pycache__/
+*.pyc
+
+bin/
+obj/
+.vs/
+*.user
+
+# local corpus + parity-test outputs (customer data - never commit)
+corpus/
+corpus-out/
+
+# employer-proprietary reference material (Tier 3) - never commit/publish
+reference/
+
+# --- publish hygiene (siteml/Etiquette) ---
+# corpus dir regardless of casing + the packed copy
+[Cc]orpus/
+Corpus.zip
+# oversized logo original (assets/ has the shipped ones)
+/Logo.png
+# production label templates - may reference site data; examples/ is the
+# public sample set
+/templates/
+# internal dev handoff (names employer/site infrastructure)
+/HANDOFF.md
+# Tier 2 material (belongs only in the private etiquette-btw repo;
+# see PROVENANCE.md)
+/docs/btw-format.md
+/tools/recon/
+# local-only notes
+*.local.md
+
+# nested private repo (etiquette-btw clone) - the public tree must not carry its gitlink
+src/Etiq.Btw/
+
+# local full solution — includes the private Etiq.Btw project, so it must not
+# ship; public clones use Etiquette.sln (see PROVENANCE.md)
+/Etiquette.Local.sln
