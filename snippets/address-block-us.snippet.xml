@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ships with Etiquette. Insert, then re-point the helper fields' sources
+     at your data (e.g. source="list" list="Customers" column="City"). -->
+<etiq:snippet xmlns:etiq="https://etiquette.dev/ns/0.1"
+              name="Address Block (US)"
+              description="Street / Address2 / City, ST ZIP - blank lines collapse, no dangling commas">
+  <etiq:field name="AddrStreet" source="prompt" caption="Street:"/>
+  <etiq:field name="AddrStreet2" source="prompt" caption="Street 2 (optional):"/>
+  <etiq:field name="AddrCity" source="prompt" caption="City:"/>
+  <etiq:field name="AddrState" source="prompt" caption="State:"/>
+  <etiq:field name="AddrZip" source="prompt" caption="ZIP:"/>
+  <etiq:field name="AddressBlock" source="compose" collapse-blank-lines="true">
+    <etiq:seg ref="AddrStreet"/>
+    <etiq:seg newline="true"/>
+    <etiq:seg ref="AddrStreet2"/>
+    <etiq:seg newline="true"/>
+    <etiq:seg ref="AddrCity"/>
+    <etiq:seg ref="AddrState" sep=", "/>
+    <etiq:seg ref="AddrZip" sep=" "/>
+  </etiq:field>
+</etiq:snippet>

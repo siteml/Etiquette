@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Deliberately no test framework package: plain asserts, `dotnet run`
+         to execute. Keeps the repo NuGet-free (locked-down build machines). -->
+  </PropertyGroup>
+
+  <PropertyGroup Condition="Exists('..\..\src\Etiq.Btw\Etiq.Btw.csproj') Or Exists('..\..\..\etiquette-btw\src\Etiq.Btw\Etiq.Btw.csproj')">
+    <DefineConstants>$(DefineConstants);ETIQ_BTW</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Etiq.Core\Etiq.Core.csproj" />
+    <ProjectReference Include="..\..\src\Etiq.Editor.Core\Etiq.Editor.Core.csproj" />
+    <!-- in-repo BTW module preferred; sibling private repo as fallback -->
+    <ProjectReference Include="..\..\src\Etiq.Btw\Etiq.Btw.csproj"
+                      Condition="Exists('..\..\src\Etiq.Btw\Etiq.Btw.csproj')" />
+    <ProjectReference Include="..\..\..\etiquette-btw\src\Etiq.Btw\Etiq.Btw.csproj"
+                      Condition="!Exists('..\..\src\Etiq.Btw\Etiq.Btw.csproj') And Exists('..\..\..\etiquette-btw\src\Etiq.Btw\Etiq.Btw.csproj')" />
+  </ItemGroup>
+
+</Project>

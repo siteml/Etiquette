@@ -1,0 +1,59 @@
+name: release
+
+# Tag a commit vX.Y.Z (matching <Version> in src/Etiq.Editor/Etiq.Editor.csproj)
+# and push the tag: this builds the designer in TWO flavors and attaches both
+# to a GitHub Release. etiqedit's Help → Check for Updates compares against
+# the tag.
+#
+#   etiqedit-vX.Y.Z-win-x64-standalone.zip  — self-contained, runs anywhere
+#                                             (bundles the .NET runtime, ~large)
+#   etiqedit-vX.Y.Z-win-x64.zip             — framework-dependent, small;
+#                                             needs the .NET 8 Desktop Runtime
+#                                             installed on the machine
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Run tests
+        run: dotnet run --project tests/Etiq.Tests --configuration Release
+
+      - name: Publish (self-contained)
+        run: >
+          dotnet publish src/Etiq.Editor -c Release -r win-x64
+          -p:PublishSingleFile=true --self-contained true
+          -o publish/standalone
+      - name: Publish (framework-dependent)
+        run: >
+          dotnet publish src/Etiq.Editor -c Release -r win-x64
+          -p:PublishSingleFile=true --self-contained false
+          -o publish/fdd
+
+      - name: Zip both
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish/standalone/* -DestinationPath "etiqedit-${{ github.ref_name }}-win-x64-standalone.zip"
+          Compress-Archive -Path publish/fdd/* -DestinationPath "etiqedit-${{ github.ref_name }}-win-x64.zip"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: >
+          gh release create "${{ github.ref_name }}"
+          "etiqedit-${{ github.ref_name }}-win-x64-standalone.zip"
+          "etiqedit-${{ github.ref_name }}-win-x64.zip"
+          --title "etiqedit ${{ github.ref_name }}"
+          --generate-notes
+          --notes "**Which download?** The **-standalone** zip runs on any 64-bit Windows with nothing installed (it bundles the .NET runtime). The smaller zip needs the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) installed."

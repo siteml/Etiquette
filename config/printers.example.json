@@ -1,0 +1,6 @@
+[
+  { "name": "ZT230",            "dpi": 203, "widthMils": 4090, "path": "zpl" },
+  { "name": "Toshiba B-EX4T2",  "dpi": 203, "widthMils": 4090, "path": "driver" },
+  { "name": "Zebra 105Se",      "dpi": 203, "widthMils": 4090, "path": "driver" },
+  { "name": "Brother PT-D410",  "dpi": 180, "widthMils": 708,  "path": "driver" }
+]

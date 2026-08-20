@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ships with Etiquette. Comprehensive country-aware address block.
+
+     How it works: AddrCC normalizes whatever lands in AddrCountry
+     ("Germany", "DEUTSCHLAND", "de", blank) to an ISO code via the
+     CountryCode map; AddressBlock switches on AddrCC, and each variant's
+     when="DE|AT|CH|…" covers a whole FORMAT GROUP - so ~35 countries need
+     only 6 variants. Countries print their mailing name via CountryName;
+     unknown countries fall to the default variant and print as typed
+     (uppercased). Blank country = US domestic (no country line).
+
+     After inserting: re-point the Addr* fields' sources at your data
+     (e.g. source="list" list="Customers" column="City"). AddrName is
+     included for the recipient line - bind it to its own text element;
+     it is intentionally NOT part of the block. -->
+<etiq:snippet xmlns:etiq="https://etiquette.dev/ns/0.1"
+              name="Address Block (International, comprehensive)"
+              description="~35 countries in 6 format groups; names or ISO codes accepted; unknowns print as typed">
+
+  <etiq:field name="AddrName" source="prompt" caption="Recipient name:"/>
+  <etiq:field name="AddrStreet" source="prompt" caption="Street:"/>
+  <etiq:field name="AddrStreet2" source="prompt" caption="Street 2 (optional):"/>
+  <etiq:field name="AddrCity" source="prompt" caption="City:"/>
+  <etiq:field name="AddrState" source="prompt" caption="State/Province/County (optional):"/>
+  <etiq:field name="AddrZip" source="prompt" caption="Postal code:"/>
+  <etiq:field name="AddrCountry" source="prompt" caption="Country (name or code, blank = US):"/>
+
+  <!-- normalization helper: anything -> ISO code (XX = unknown) -->
+  <etiq:field name="AddrCC" source="compose">
+    <etiq:seg ref="AddrCountry" case="upper" map="CountryCode"/>
+  </etiq:field>
+
+  <etiq:map name="CountryCode" default="XX">
+    <etiq:when from="" to="US"/>
+    <etiq:when from="US" to="US"/>
+    <etiq:when from="USA" to="US"/>
+    <etiq:when from="UNITED STATES" to="US"/>
+    <etiq:when from="UNITED STATES OF AMERICA" to="US"/>
+    <etiq:when from="CA" to="CA"/>
+    <etiq:when from="CANADA" to="CA"/>
+    <etiq:when from="MX" to="MX"/>
+    <etiq:when from="MEXICO" to="MX"/>
+    <etiq:when from="GB" to="GB"/>
+    <etiq:when from="UK" to="GB"/>
+    <etiq:when from="UNITED KINGDOM" to="GB"/>
+    <etiq:when from="GREAT BRITAIN" to="GB"/>
+    <etiq:when from="ENGLAND" to="GB"/>
+    <etiq:when from="SCOTLAND" to="GB"/>
+    <etiq:when from="WALES" to="GB"/>
+    <etiq:when from="NORTHERN IRELAND" to="GB"/>
+    <etiq:when from="IE" to="IE"/>
+    <etiq:when from="IRELAND" to="IE"/>
+    <etiq:when from="DE" to="DE"/>
+    <etiq:when from="GERMANY" to="DE"/>
+    <etiq:when from="DEUTSCHLAND" to="DE"/>
+    <etiq:when from="AT" to="AT"/>
+    <etiq:when from="AUSTRIA" to="AT"/>
+    <etiq:when from="CH" to="CH"/>
+    <etiq:when from="SWITZERLAND" to="CH"/>
+    <etiq:when from="NL" to="NL"/>
+    <etiq:when from="NETHERLANDS" to="NL"/>
+    <etiq:when from="THE NETHERLANDS" to="NL"/>
+    <etiq:when from="HOLLAND" to="NL"/>
+    <etiq:when from="BE" to="BE"/>
+    <etiq:when from="BELGIUM" to="BE"/>
+    <etiq:when from="FR" to="FR"/>
+    <etiq:when from="FRANCE" to="FR"/>
+    <etiq:when from="IT" to="IT"/>
+    <etiq:when from="ITALY" to="IT"/>
+    <etiq:when from="ES" to="ES"/>
+    <etiq:when from="SPAIN" to="ES"/>
+    <etiq:when from="PT" to="PT"/>
+    <etiq:when from="PORTUGAL" to="PT"/>
+    <etiq:when from="DK" to="DK"/>
+    <etiq:when from="DENMARK" to="DK"/>
+    <etiq:when from="NO" to="NO"/>
+    <etiq:when from="NORWAY" to="NO"/>
+    <etiq:when from="SE" to="SE"/>
+    <etiq:when from="SWEDEN" to="SE"/>
+    <etiq:when from="FI" to="FI"/>
+    <etiq:when from="FINLAND" to="FI"/>
+    <etiq:when from="PL" to="PL"/>
+    <etiq:when from="POLAND" to="PL"/>
+    <etiq:when from="CZ" to="CZ"/>
+    <etiq:when from="CZECHIA" to="CZ"/>
+    <etiq:when from="CZECH REPUBLIC" to="CZ"/>
+    <etiq:when from="SK" to="SK"/>
+    <etiq:when from="SLOVAKIA" to="SK"/>
+    <etiq:when from="HU" to="HU"/>
+    <etiq:when from="HUNGARY" to="HU"/>
+    <etiq:when from="GR" to="GR"/>
+    <etiq:when from="GREECE" to="GR"/>
+    <etiq:when from="LU" to="LU"/>
+    <etiq:when from="LUXEMBOURG" to="LU"/>
+    <etiq:when from="AU" to="AU"/>
+    <etiq:when from="AUSTRALIA" to="AU"/>
+    <etiq:when from="NZ" to="NZ"/>
+    <etiq:when from="NEW ZEALAND" to="NZ"/>
+    <etiq:when from="JP" to="JP"/>
+    <etiq:when from="JAPAN" to="JP"/>
+    <etiq:when from="CN" to="CN"/>
+    <etiq:when from="CHINA" to="CN"/>
+    <etiq:when from="KR" to="KR"/>
+    <etiq:when from="SOUTH KOREA" to="KR"/>
+    <etiq:when from="KOREA" to="KR"/>
+    <etiq:when from="REPUBLIC OF KOREA" to="KR"/>
+    <etiq:when from="SG" to="SG"/>
+    <etiq:when from="SINGAPORE" to="SG"/>
+    <etiq:when from="IL" to="IL"/>
+    <etiq:when from="ISRAEL" to="IL"/>
+    <etiq:when from="TR" to="TR"/>
+    <etiq:when from="TURKEY" to="TR"/>
+    <etiq:when from="TURKIYE" to="TR"/>
+    <etiq:when from="IN" to="IN"/>
+    <etiq:when from="INDIA" to="IN"/>
+    <etiq:when from="BR" to="BR"/>
+    <etiq:when from="BRAZIL" to="BR"/>
+    <etiq:when from="BRASIL" to="BR"/>
+  </etiq:map>
+
+  <!-- same key set as CountryCode, so the mapped country line can never
+       miss inside a known-group variant -->
+  <etiq:map name="CountryName">
+    <etiq:when from="CA" to="CANADA"/>
+    <etiq:when from="CANADA" to="CANADA"/>
+    <etiq:when from="MX" to="MEXICO"/>
+    <etiq:when from="MEXICO" to="MEXICO"/>
+    <etiq:when from="GB" to="UNITED KINGDOM"/>
+    <etiq:when from="UK" to="UNITED KINGDOM"/>
+    <etiq:when from="UNITED KINGDOM" to="UNITED KINGDOM"/>
+    <etiq:when from="GREAT BRITAIN" to="UNITED KINGDOM"/>
+    <etiq:when from="ENGLAND" to="UNITED KINGDOM"/>
+    <etiq:when from="SCOTLAND" to="UNITED KINGDOM"/>
+    <etiq:when from="WALES" to="UNITED KINGDOM"/>
+    <etiq:when from="NORTHERN IRELAND" to="UNITED KINGDOM"/>
+    <etiq:when from="IE" to="IRELAND"/>
+    <etiq:when from="IRELAND" to="IRELAND"/>
+    <etiq:when from="DE" to="GERMANY"/>
+    <etiq:when from="GERMANY" to="GERMANY"/>
+    <etiq:when from="DEUTSCHLAND" to="GERMANY"/>
+    <etiq:when from="AT" to="AUSTRIA"/>
+    <etiq:when from="AUSTRIA" to="AUSTRIA"/>
+    <etiq:when from="CH" to="SWITZERLAND"/>
+    <etiq:when from="SWITZERLAND" to="SWITZERLAND"/>
+    <etiq:when from="NL" to="NETHERLANDS"/>
+    <etiq:when from="NETHERLANDS" to="NETHERLANDS"/>
+    <etiq:when from="THE NETHERLANDS" to="NETHERLANDS"/>
+    <etiq:when from="HOLLAND" to="NETHERLANDS"/>
+    <etiq:when from="BE" to="BELGIUM"/>
+    <etiq:when from="BELGIUM" to="BELGIUM"/>
+    <etiq:when from="FR" to="FRANCE"/>
+    <etiq:when from="FRANCE" to="FRANCE"/>
+    <etiq:when from="IT" to="ITALY"/>
+    <etiq:when from="ITALY" to="ITALY"/>
+    <etiq:when from="ES" to="SPAIN"/>
+    <etiq:when from="SPAIN" to="SPAIN"/>
+    <etiq:when from="PT" to="PORTUGAL"/>
+    <etiq:when from="PORTUGAL" to="PORTUGAL"/>
+    <etiq:when from="DK" to="DENMARK"/>
+    <etiq:when from="DENMARK" to="DENMARK"/>
+    <etiq:when from="NO" to="NORWAY"/>
+    <etiq:when from="NORWAY" to="NORWAY"/>
+    <etiq:when from="SE" to="SWEDEN"/>
+    <etiq:when from="SWEDEN" to="SWEDEN"/>
+    <etiq:when from="FI" to="FINLAND"/>
+    <etiq:when from="FINLAND" to="FINLAND"/>
+    <etiq:when from="PL" to="POLAND"/>
+    <etiq:when from="POLAND" to="POLAND"/>
+    <etiq:when from="CZ" to="CZECHIA"/>
+    <etiq:when from="CZECHIA" to="CZECHIA"/>
+    <etiq:when from="CZECH REPUBLIC" to="CZECHIA"/>
+    <etiq:when from="SK" to="SLOVAKIA"/>
+    <etiq:when from="SLOVAKIA" to="SLOVAKIA"/>
+    <etiq:when from="HU" to="HUNGARY"/>
+    <etiq:when from="HUNGARY" to="HUNGARY"/>
+    <etiq:when from="GR" to="GREECE"/>
+    <etiq:when from="GREECE" to="GREECE"/>
+    <etiq:when from="LU" to="LUXEMBOURG"/>
+    <etiq:when from="LUXEMBOURG" to="LUXEMBOURG"/>
+    <etiq:when from="AU" to="AUSTRALIA"/>
+    <etiq:when from="AUSTRALIA" to="AUSTRALIA"/>
+    <etiq:when from="NZ" to="NEW ZEALAND"/>
+    <etiq:when from="NEW ZEALAND" to="NEW ZEALAND"/>
+    <etiq:when from="JP" to="JAPAN"/>
+    <etiq:when from="JAPAN" to="JAPAN"/>
+    <etiq:when from="CN" to="CHINA"/>
+    <etiq:when from="CHINA" to="CHINA"/>
+    <etiq:when from="KR" to="SOUTH KOREA"/>
+    <etiq:when from="SOUTH KOREA" to="SOUTH KOREA"/>
+    <etiq:when from="KOREA" to="SOUTH KOREA"/>
+    <etiq:when from="REPUBLIC OF KOREA" to="SOUTH KOREA"/>
+    <etiq:when from="SG" to="SINGAPORE"/>
+    <etiq:when from="SINGAPORE" to="SINGAPORE"/>
+    <etiq:when from="IL" to="ISRAEL"/>
+    <etiq:when from="ISRAEL" to="ISRAEL"/>
+    <etiq:when from="TR" to="TURKEY"/>
+    <etiq:when from="TURKEY" to="TURKEY"/>
+    <etiq:when from="TURKIYE" to="TURKEY"/>
+    <etiq:when from="IN" to="INDIA"/>
+    <etiq:when from="INDIA" to="INDIA"/>
+    <etiq:when from="BR" to="BRAZIL"/>
+    <etiq:when from="BRAZIL" to="BRAZIL"/>
+    <etiq:when from="BRASIL" to="BRAZIL"/>
+  </etiq:map>
+
+  <etiq:field name="AddressBlock" source="compose" switch-on="AddrCC"
+              collapse-blank-lines="true">
+
+    <!-- US domestic: City, ST ZIP - no country line -->
+    <etiq:variant when="US">
+      <etiq:seg ref="AddrStreet"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrStreet2"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCity"/>
+      <etiq:seg ref="AddrState" sep=", "/>
+      <etiq:seg ref="AddrZip" sep=" "/>
+    </etiq:variant>
+
+    <!-- City PROV POSTAL (no comma) + country -->
+    <etiq:variant when="CA|AU|NZ">
+      <etiq:seg ref="AddrStreet"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrStreet2"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCity"/>
+      <etiq:seg ref="AddrState" sep=" "/>
+      <etiq:seg ref="AddrZip" sep=" "/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCountry" case="upper" map="CountryName"/>
+    </etiq:variant>
+
+    <!-- postcode on its own line + country -->
+    <etiq:variant when="GB|IE">
+      <etiq:seg ref="AddrStreet"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrStreet2"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCity"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrState"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrZip"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCountry" case="upper" map="CountryName"/>
+    </etiq:variant>
+
+    <!-- ZIP City + country (most of continental Europe, MX, TR) -->
+    <etiq:variant when="DE|AT|CH|NL|BE|FR|IT|ES|PT|DK|NO|SE|FI|PL|CZ|SK|HU|GR|LU|MX|TR">
+      <etiq:seg ref="AddrStreet"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrStreet2"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrZip"/>
+      <etiq:seg ref="AddrCity" sep=" "/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCountry" case="upper" map="CountryName"/>
+    </etiq:variant>
+
+    <!-- City ZIP + country (romanized JP/CN/KR, SG, IL, IN) -->
+    <etiq:variant when="JP|CN|KR|SG|IL|IN">
+      <etiq:seg ref="AddrStreet"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrStreet2"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCity"/>
+      <etiq:seg ref="AddrZip" sep=" "/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCountry" case="upper" map="CountryName"/>
+    </etiq:variant>
+
+    <!-- everything else: US-style ordering + country line AS TYPED -->
+    <etiq:variant>
+      <etiq:seg ref="AddrStreet"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrStreet2"/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCity"/>
+      <etiq:seg ref="AddrState" sep=", "/>
+      <etiq:seg ref="AddrZip" sep=" "/>
+      <etiq:seg newline="true"/>
+      <etiq:seg ref="AddrCountry" case="upper"/>
+    </etiq:variant>
+  </etiq:field>
+</etiq:snippet>
