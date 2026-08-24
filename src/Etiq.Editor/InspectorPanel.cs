@@ -12,38 +12,185 @@ namespace Etiq.Editor;
 /// </summary>
 public sealed class InspectorPanel : UserControl
 {
-    private readonly TableLayoutPanel _table;
+    private TableLayoutPanel _table;                      // ACTIVE set (also the build target)
+    private List<Action> _refreshers = new();             // active set's model → control re-readers
     private readonly ToolTip _tips = new();
     private readonly GdiTextMeasurer _measurer = new();
     private EditorDoc? _doc;
     private List<EditorObject> _objs = new();
     private bool _loading;                                // guard: setting control values
-    private readonly List<Action> _refreshers = new();    // model → control re-readers
+
+    // ---------- control-set cache ----------
+    // Built panels are KEPT (hidden) and re-shown on reselect: switching
+    // between recently used elements flips Visible + re-reads values
+    // instead of destroying and recreating ~20 controls per click.
+    private sealed class CachedSet
+    {
+        public TableLayoutPanel Table = null!;
+        public List<Action> Refreshers = new();
+    }
+    private readonly Dictionary<string, CachedSet> _cache = new();
+    private readonly List<string> _lru = new();           // oldest first
+    private const int CacheMax = 12;
+    private EditorDoc? _cacheDoc;
 
     /// <summary>Raised after any committed edit (canvas + outline refresh).</summary>
     public event Action? Changed;
 
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _tips.Dispose();
+            _measurer.Dispose();
+            _boldFont?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
     public InspectorPanel()
     {
         AutoScroll = true;
-        _table = new TableLayoutPanel
+        _table = NewTable();
+        Controls.Add(_table);
+    }
+
+    private static TableLayoutPanel NewTable()
+    {
+        var t = new TableLayoutPanel
         {
             Dock = DockStyle.Top, ColumnCount = 2, AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(4, 4, 4, 8),
         };
-        _table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
-        _table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        Controls.Add(_table);
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        return t;
     }
 
     // ---------- public API ----------
 
-    /// <summary>Rebuild the panel for the current selection.</summary>
+    private string _shape = "";   // what the row STRUCTURE was built from
+
+    /// <summary>Rebuild the panel for the current selection. When the
+    /// selection (and everything the row structure depends on) is unchanged
+    /// — e.g. SelectionChanged re-fired after a context-menu edit or an
+    /// inline text commit — skip the expensive rebuild and just re-read
+    /// values into the existing controls.</summary>
     public void ShowSelection(EditorDoc? doc, IReadOnlyList<EditorObject> selection)
     {
+        if (!ReferenceEquals(doc, _cacheDoc)) { ClearCache(); _cacheDoc = doc; }
         _doc = doc;
         _objs = doc is null ? new List<EditorObject>() : selection.ToList();
-        Rebuild();
+        Reshape();
+    }
+
+    /// <summary>Bring the visible row set in line with the current
+    /// selection: same shape = value re-read only; known shape = swap in
+    /// the cached set; new shape = build (once) and cache.</summary>
+    private void Reshape()
+    {
+        string shape = Shape();
+        if (shape == _shape) { RefreshValues(); return; }
+        if (_cache.TryGetValue(shape, out var set)) Activate(shape, set);
+        else Rebuild();
+    }
+
+    /// <summary>Swap in an already-built control set: no creation, no
+    /// disposal — just visibility and a value re-read.</summary>
+    private void Activate(string shape, CachedSet set)
+    {
+        SuspendLayout();
+        var prev = _table;
+        string prevShape = _shape;
+        _table = set.Table;
+        _refreshers = set.Refreshers;
+        _shape = shape;
+        Touch(shape);
+        RefreshValues();                       // before showing: no stale flash
+        set.Table.Visible = true;
+        Retire(prev, prevShape);
+        AutoScrollPosition = Point.Empty;
+        ResumeLayout();
+    }
+
+    /// <summary>Hide an outgoing panel if the cache still owns it;
+    /// dispose it if it was never cached (ctor placeholder, evicted).</summary>
+    private void Retire(TableLayoutPanel prev, string prevShape)
+    {
+        if (ReferenceEquals(prev, _table)) return;
+        if (_cache.TryGetValue(prevShape, out var ps) && ReferenceEquals(ps.Table, prev))
+            prev.Visible = false;
+        else
+        {
+            Controls.Remove(prev);
+            prev.Dispose();
+        }
+    }
+
+    private void Touch(string shape)
+    {
+        _lru.Remove(shape);
+        _lru.Add(shape);
+    }
+
+    private void Evict()
+    {
+        while (_lru.Count > CacheMax)
+        {
+            string s = _lru[0];
+            _lru.RemoveAt(0);
+            if (_cache.Remove(s, out var set))
+            {
+                Controls.Remove(set.Table);
+                set.Table.Dispose();
+            }
+        }
+    }
+
+    private void ClearCache()
+    {
+        foreach (var set in _cache.Values)
+        {
+            Controls.Remove(set.Table);
+            set.Table.Dispose();
+        }
+        _cache.Clear();
+        _lru.Clear();
+        // the active table may have just been disposed with the cache
+        if (!_table.IsDisposed) { Controls.Remove(_table); _table.Dispose(); }
+        _table = NewTable();
+        Controls.Add(_table);
+        _refreshers = new List<Action>();
+        _shape = "";
+    }
+
+    /// <summary>The object the active single-object rows edit. Row getters
+    /// and setters resolve it AT CALL TIME (never capture a specific
+    /// object), so one built panel serves EVERY element of that shape —
+    /// selecting a different text element reuses the same controls.</summary>
+    private EditorObject O => _objs[0];
+
+    /// <summary>Text objects of the current multi selection, resolved at
+    /// call time for the same reason as O.</summary>
+    private List<EditorObject> Texts() =>
+        _objs.Where(x => x.Kind == ObjectKind.Text).ToList();
+
+    /// <summary>Signature of everything that decides WHICH rows exist —
+    /// the element TYPE, not its identity: kind, symbology, QR logo mode
+    /// (full value when embedded: the Extract caption bakes in the size),
+    /// has-text for multi. Per-object values are read through O.</summary>
+    private string Shape()
+    {
+        if (_doc is null || _objs.Count == 0) return "empty";
+        if (_objs.Count > 1)
+            return "multi|" + (Texts().Count > 0);
+        var o = _objs[0];
+        string logo = (string?)o.El.Attribute("data-logo") ?? "";
+        string logoKey = logo is "" or "etiq" ? logo
+            : logo.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
+                ? "data:" + logo.Length          // length, not the whole URI, as key
+                : "custom";
+        return $"{o.Kind}|{(string?)o.El.Attribute("data-barcode")}|{logoKey}";
     }
 
     /// <summary>Re-read every value from the model (live drag / undo /
@@ -60,14 +207,32 @@ public sealed class InspectorPanel : UserControl
 
     // ---------- build ----------
 
+    private const int WM_SETREDRAW = 0x000B;
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
     private void Rebuild()
     {
+        bool redraw = IsHandleCreated;
+        if (redraw) SendMessage(Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
         SuspendLayout();
+
+        string shape = Shape();
+        // an internal rebuild (symbology / logo-mode change) makes any
+        // cached set for this shape stale — drop it before rebuilding
+        if (_cache.Remove(shape, out var stale))
+        {
+            _lru.Remove(shape);
+            Controls.Remove(stale.Table);
+            stale.Table.Dispose();
+        }
+
+        var prev = _table;
+        string prevShape = _shape;
+        _table = NewTable();
+        _refreshers = new List<Action>();
         _table.SuspendLayout();
-        _table.Controls.Clear();
-        _table.RowStyles.Clear();
-        _table.RowCount = 0;
-        _refreshers.Clear();
+        _table.Visible = false;                // add hidden, show when built
 
         if (_doc is null || _objs.Count == 0)
         {
@@ -83,94 +248,111 @@ public sealed class InspectorPanel : UserControl
         }
 
         _table.ResumeLayout();
-        ResumeLayout();
+        Controls.Add(_table);
+        _cache[shape] = new CachedSet { Table = _table, Refreshers = _refreshers };
+        _shape = shape;
+        Touch(shape);
+        Evict();
         RefreshValues();
+        _table.Visible = true;
+        Retire(prev, prevShape);
+        AutoScrollPosition = Point.Empty;
+
+        ResumeLayout();
+        if (redraw)
+        {
+            SendMessage(Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+            Refresh();
+        }
     }
 
+    // NOTE for every builder below: lambdas must reference the selection
+    // through O / Texts() — never a captured EditorObject — so the cached
+    // panel is reusable for any element of the same shape.
     private void BuildSingle(EditorObject o)
     {
-        AddHeader($"{o.Kind}   ·   layer {o.Layer?.Name ?? "(none)"}");
+        AddHeader(() => $"{O.Kind}   ·   layer {O.Layer?.Name ?? "(none)"}");
 
         // position (lines edit their endpoints instead)
         if (o.Kind == ObjectKind.Line)
         {
-            AddNum("X1", () => o.GetNum("x1"), v => SetAttr(o, "x1", N(v), "set X1"));
-            AddNum("Y1", () => o.GetNum("y1"), v => SetAttr(o, "y1", N(v), "set Y1"));
-            AddNum("X2", () => o.GetNum("x2"), v => SetAttr(o, "x2", N(v), "set X2"));
-            AddNum("Y2", () => o.GetNum("y2"), v => SetAttr(o, "y2", N(v), "set Y2"));
-            AddNum("Stroke", () => o.GetNum("stroke-width", 1),
-                v => SetAttr(o, "stroke-width", v <= 0 ? null : N(v), "set stroke"));
+            AddNum("X1", () => O.GetNum("x1"), v => SetAttr(O, "x1", N(v), "set X1"));
+            AddNum("Y1", () => O.GetNum("y1"), v => SetAttr(O, "y1", N(v), "set Y1"));
+            AddNum("X2", () => O.GetNum("x2"), v => SetAttr(O, "x2", N(v), "set X2"));
+            AddNum("Y2", () => O.GetNum("y2"), v => SetAttr(O, "y2", N(v), "set Y2"));
+            AddNum("Stroke", () => O.GetNum("stroke-width", 1),
+                v => SetAttr(O, "stroke-width", v <= 0 ? null : N(v), "set stroke"));
             return;
         }
 
-        AddNum("X", () => o.GetNum("x"), v => SetAttr(o, "x", N(v), "set X"));
-        AddNum("Y", () => o.GetNum("y"), v => SetAttr(o, "y", N(v), "set Y"));
-        AddNum("Rotation", () => o.RotationDeg, v => Push(o.SetRotation(v)), step: 15);
+        AddNum("X", () => O.GetNum("x"), v => SetAttr(O, "x", N(v), "set X"));
+        AddNum("Y", () => O.GetNum("y"), v => SetAttr(O, "y", N(v), "set Y"));
+        AddNum("Rotation", () => O.RotationDeg, v => Push(O.SetRotation(v)), step: 15);
 
         switch (o.Kind)
         {
-            case ObjectKind.Text: BuildText(o); break;
+            case ObjectKind.Text: BuildText(); break;
             case ObjectKind.Barcode: BuildBarcode(o); break;
             case ObjectKind.Box:
-                AddNum("Width", () => o.GetNum("width"), v => SetAttr(o, "width", N(v), "set width"));
-                AddNum("Height", () => o.GetNum("height"), v => SetAttr(o, "height", N(v), "set height"));
-                AddCheck("Filled", () => ((string?)o.El.Attribute("fill") ?? "none") != "none",
-                    v => SetAttr(o, "fill", v ? "black" : null, "set fill"));
-                AddNum("Stroke", () => o.GetNum("stroke-width", 1),
-                    v => SetAttr(o, "stroke-width", v <= 0 ? null : N(v), "set stroke"));
+                AddNum("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
+                AddNum("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
+                AddCheck("Filled", () => ((string?)O.El.Attribute("fill") ?? "none") != "none",
+                    v => SetAttr(O, "fill", v ? "black" : null, "set fill"));
+                AddNum("Stroke", () => O.GetNum("stroke-width", 1),
+                    v => SetAttr(O, "stroke-width", v <= 0 ? null : N(v), "set stroke"));
                 break;
             case ObjectKind.Image:
-                AddNum("Width", () => o.GetNum("width"), v => SetAttr(o, "width", N(v), "set width"));
-                AddNum("Height", () => o.GetNum("height"), v => SetAttr(o, "height", N(v), "set height"));
+                AddNum("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
+                AddNum("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
                 break;
         }
     }
 
-    private void BuildText(EditorObject o)
+    private void BuildText()
     {
         AddHeader("Text");
         // multiline content edits through the shared prompt (Enter = new line)
-        AddButtonRow("Text", () => Snip(o.El.Value), "Edit…", () =>
+        AddButtonRow("Text", () => Snip(O.El.Value), "Edit…", () =>
         {
             string? t = Prompts.PromptText(FindForm()!, "Edit text (Enter = new line)",
-                o.El.Value, multiline: true);
-            if (t is not null) Push(o.SetText(t));
+                O.El.Value, multiline: true);
+            if (t is not null) Push(O.SetText(t));
         });
-        AddCombo("Font", InstalledFonts(), () => o.FontFamily,
-            v => SetAttr(o, "font-family", v == "" ? null : v, "set font"), editable: true);
-        AddNum("Font size", () => o.GetNum("font-size", 12),
-            v => SetAttr(o, "font-size", N(Math.Max(1, v)), "set font size"));
-        AddCheck("Bold", () => o.Bold,
-            v => SetAttr(o, "font-weight", v ? "bold" : null, "set bold"));
-        AddNum("Line height", () => o.GetNum("data-line-height"),
-            v => SetAttr(o, "data-line-height", v <= 0 ? null : N(v), "set line height"),
+        AddCombo("Font", InstalledFonts(), () => O.FontFamily,
+            v => SetAttr(O, "font-family", v == "" ? null : v, "set font"), editable: true);
+        AddNum("Font size", () => O.GetNum("font-size", 12),
+            v => SetAttr(O, "font-size", N(Math.Max(1, v)), "set font size"));
+        AddCheck("Bold", () => O.Bold,
+            v => SetAttr(O, "font-weight", v ? "bold" : null, "set bold"));
+        AddNum("Line height", () => O.GetNum("data-line-height"),
+            v => SetAttr(O, "data-line-height", v <= 0 ? null : N(v), "set line height"),
             allowEmpty: true, hint: "baseline-to-baseline; empty = 1.2 × font size");
 
         AddHeader("Fit box");
         AddCombo("Fit mode", new[] { "", "none", "width", "box" },
-            () => (string?)o.El.Attribute("data-fit") ?? "",
-            v => SetAttr(o, "data-fit", v == "" ? null : v, "set fit mode"));
-        AddNum("Width", () => o.GetNum("data-width"),
-            v => SetAttr(o, "data-width", v <= 0 ? null : N(v), "set width"),
+            () => (string?)O.El.Attribute("data-fit") ?? "",
+            v => SetAttr(O, "data-fit", v == "" ? null : v, "set fit mode"));
+        AddNum("Width", () => O.GetNum("data-width"),
+            v => SetAttr(O, "data-width", v <= 0 ? null : N(v), "set width"),
             allowEmpty: true, hint: "empty = natural width");
-        AddNum("Height", () => o.GetNum("data-height"),
-            v => SetAttr(o, "data-height", v <= 0 ? null : N(v), "set height"),
+        AddNum("Height", () => O.GetNum("data-height"),
+            v => SetAttr(O, "data-height", v <= 0 ? null : N(v), "set height"),
             allowEmpty: true, hint: "empty = natural height");
         AddCombo("Align", new[] { "", "left", "center", "right" },
-            () => (string?)o.El.Attribute("data-align") ?? "",
-            v => SetAttr(o, "data-align", v is "" or "left" ? null : v, "set align"));
+            () => (string?)O.El.Attribute("data-align") ?? "",
+            v => SetAttr(O, "data-align", v is "" or "left" ? null : v, "set align"));
         AddCombo("Vert. align", new[] { "", "top", "middle", "bottom" },
-            () => (string?)o.El.Attribute("data-valign") ?? "",
-            v => SetAttr(o, "data-valign", v is "" or "top" ? null : v, "set valign"));
+            () => (string?)O.El.Attribute("data-valign") ?? "",
+            v => SetAttr(O, "data-valign", v is "" or "top" ? null : v, "set valign"));
         AddCombo("Overflow", new[] { "", "shrink", "clip", "wrap" },
-            () => (string?)o.El.Attribute("data-overflow") ?? "",
-            v => SetAttr(o, "data-overflow", v == "" ? null : v, "set overflow"));
+            () => (string?)O.El.Attribute("data-overflow") ?? "",
+            v => SetAttr(O, "data-overflow", v == "" ? null : v, "set overflow"));
 
         AddHeader("Data");
-        AddCombo("Field", FieldNames(), () => (string?)o.El.Attribute("data-field") ?? "",
-            v => SetAttr(o, "data-field", v == "" ? null : v, "bind field"), editable: true);
-        AddNum("Line #", () => o.GetNum("data-line", -1),
-            v => SetAttr(o, "data-line", v < 0 ? null : ((int)v).ToString(), "set line index"),
+        AddCombo("Field", FieldNames(), () => (string?)O.El.Attribute("data-field") ?? "",
+            v => SetAttr(O, "data-field", v == "" ? null : v, "bind field"), editable: true);
+        AddNum("Line #", () => O.GetNum("data-line", -1),
+            v => SetAttr(O, "data-line", v < 0 ? null : ((int)v).ToString(), "set line index"),
             allowEmpty: true, unset: -1,
             hint: "Line-stack element: show only line N (0-based) of the field's value");
     }
@@ -178,40 +360,98 @@ public sealed class InspectorPanel : UserControl
     private void BuildBarcode(EditorObject o)
     {
         string sym = (string?)o.El.Attribute("data-barcode") ?? "";
-        AddNum("Width", () => o.GetNum("width"), v => SetAttr(o, "width", N(v), "set width"));
-        AddNum("Height", () => o.GetNum("height"), v => SetAttr(o, "height", N(v), "set height"));
+        AddNum("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
+        AddNum("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
 
         AddHeader("Barcode");
         AddCombo("Symbology", Etiq.Core.EtiqTemplate.Symbologies,
-            () => (string?)o.El.Attribute("data-barcode") ?? "",
+            () => (string?)O.El.Attribute("data-barcode") ?? "",
             v =>
             {
                 if (v == "") return;
-                SetAttr(o, "data-barcode", v, "set symbology");
-                // deferred: the rebuild disposes the combo raising this event
-                BeginInvoke(new Action(Rebuild));
+                SetAttr(O, "data-barcode", v, "set symbology");
+                // deferred: the rebuild swaps out the combo raising this event
+                BeginInvoke(new Action(Reshape));
             });
-        AddCombo("Field", FieldNames(), () => (string?)o.El.Attribute("data-field") ?? "",
-            v => SetAttr(o, "data-field", v == "" ? null : v, "bind field"), editable: true);
-        AddText("Fixed value", () => (string?)o.El.Attribute("data-value") ?? "",
-            v => SetAttr(o, "data-value", v == "" ? null : v, "set value"));
-        AddNum("Module mils", () => o.GetNum("data-module-mils"),
-            v => SetAttr(o, "data-module-mils", v <= 0 ? null : N(v), "set module mils"),
+        AddCombo("Field", FieldNames(), () => (string?)O.El.Attribute("data-field") ?? "",
+            v => SetAttr(O, "data-field", v == "" ? null : v, "bind field"), editable: true);
+        AddText("Fixed value", () => (string?)O.El.Attribute("data-value") ?? "",
+            v => SetAttr(O, "data-value", v == "" ? null : v, "set value"),
+            hint: sym == "gs1-128"
+                ? "GS1 AI syntax: (01)09501101530003(10)LOT42 — FNC1 separators are added automatically"
+                : null);
+
+        if (sym is "code128" or "code39" or "code39ext" or "gs1-128" or "itf14")
+            AddCombo("HRI", new[] { "", "none", "below", "above" },
+                () => (string?)O.El.Attribute("data-hri") ?? "",
+                v => SetAttr(O, "data-hri", v == "" ? null : v, "set hri"),
+                hint: "human-readable text inside the box, under or above the bars; empty = none");
+
+        // live feedback for symbologies whose encoding transforms or
+        // validates the value — otherwise a wrong value silently shows the
+        // placeholder and an added check digit is invisible (no HRI yet)
+        if (sym == "itf14")
+            AddStatus("Encodes", () =>
+            {
+                string v = (string?)O.El.Attribute("data-value") ?? "";
+                if (v == "") return "(field value at print time)";
+                if (!Etiq.Core.Itf.CanEncode(v)) return "✗ digits only";
+                string n = Etiq.Core.Itf.Normalize(v);
+                return n + (v.Length == 13 ? "   (check digit added)"
+                    : n.Length != v.Length ? "   (zero-padded to even)" : "");
+            }, hint: "exactly 13 digits get the GS1 check digit appended automatically");
+        else if (sym == "gs1-128")
+            AddStatus("Syntax", () =>
+            {
+                string v = (string?)O.El.Attribute("data-value") ?? "";
+                if (v == "") return "(AI syntax, e.g. (01)09501101530003(10)LOT42)";
+                return Etiq.Core.Gs1128.CanEncode(v)
+                    ? "✓ valid — encodes FNC1 + AI stream"
+                    : "✗ expected (01)09501101530003(10)LOT42 style (fixed-length AIs must match their defined length)";
+            }, hint: "parenthesized GS1 Application Identifiers; separators are handled for you");
+        AddNum("Module mils", () => O.GetNum("data-module-mils"),
+            v => SetAttr(O, "data-module-mils", v <= 0 ? null : N(v), "set module mils"),
             allowEmpty: true);
+        if (sym == "datamatrix")
+            AddCheck("Rectangular", () => (string?)O.El.Attribute("data-dmshape") == "rect",
+                v =>
+                {
+                    SetAttr(O, "data-dmshape", v ? "rect" : null, "set dm shape");
+                    // shape change moves the symbol grid — keep a tight box tight
+                    if ((string?)O.El.Attribute("data-tight") == "1"
+                        && LabelRenderer.TightBarcodeRect(O, _measurer) is { } tr)
+                        Push(O.Resize(tr, _measurer));
+                },
+                hint: "prefer the short-and-wide ECC200 rectangle formats (8x18 … 16x48); content too long for any rectangle falls back to a square");
+        if (sym == "rmqr")
+            AddCombo("ECC", new[] { "", "M", "H" },
+                () => (string?)O.El.Attribute("data-ecc") ?? "",
+                v => SetAttr(O, "data-ecc", v == "" ? null : v, "set rmqr ecc"),
+                hint: "error correction level; empty = M. The symbol version follows the box aspect automatically.");
+        if (sym is "qr" or "datamatrix" or "aztec" or "rmqr")
+            AddCheck("Tight box", () => (string?)O.El.Attribute("data-tight") == "1",
+                v =>
+                {
+                    SetAttr(O, "data-tight", v ? "1" : null, "set tight box");
+                    // enabling snaps immediately; resizes keep it snapped
+                    if (v && LabelRenderer.TightBarcodeRect(O, _measurer) is { } r)
+                        Push(O.Resize(r, _measurer));
+                },
+                hint: "keep the box snapped to the symbol's exact drawn size after every resize");
 
         if (sym == "qr")
         {
             AddHeader("QR");
             AddCombo("ECC", new[] { "", "L", "M", "Q", "H" },
-                () => (string?)o.El.Attribute("data-ecc") ?? "",
-                v => SetAttr(o, "data-ecc", v == "" ? null : v, "set qr ecc"));
-            BuildQrLogoRows(o);
+                () => (string?)O.El.Attribute("data-ecc") ?? "",
+                v => SetAttr(O, "data-ecc", v == "" ? null : v, "set qr ecc"));
+            BuildQrLogoRows();
         }
         else if (sym == "pdf417")
         {
             AddHeader("PDF417");
-            AddNum("Columns", () => o.GetNum("data-columns"),
-                v => SetAttr(o, "data-columns",
+            AddNum("Columns", () => O.GetNum("data-columns"),
+                v => SetAttr(O, "data-columns",
                     v <= 0 ? null : ((int)Math.Clamp(v, 1, 30)).ToString(), "set columns"),
                 allowEmpty: true);
         }
@@ -225,58 +465,68 @@ public sealed class InspectorPanel : UserControl
     /// source (path / URL) with Browse… + "Embed" (convert to a data: URI
     /// inside the template — no external dependency); an embedded image
     /// shows its size with "Extract…" to write it back out to a file.</summary>
-    private void BuildQrLogoRows(EditorObject o)
+    // dynamic re-reads so cached rows serve any QR element of the same mode
+    private string CurLogo() => (string?)O.El.Attribute("data-logo") ?? "";
+    private string CurLogoMode() => CurLogo() switch
     {
-        string cur = (string?)o.El.Attribute("data-logo") ?? "";
-        string mode = cur == "" ? LogoModeNone
-                    : cur == "etiq" ? LogoModeEtiq : LogoModeCustom;
-        bool embedded = cur.StartsWith("data:", StringComparison.OrdinalIgnoreCase);
-        string? baseDir = _doc?.Path is { } dp ? Path.GetDirectoryName(dp) : null;
+        "" => LogoModeNone,
+        "etiq" => LogoModeEtiq,
+        _ => LogoModeCustom,
+    };
+    private string? BaseDir() => _doc?.Path is { } dp ? Path.GetDirectoryName(dp) : null;
+
+    private void BuildQrLogoRows()
+    {
+        // structure decided at BUILD time (part of the shape key)…
+        string mode0 = CurLogoMode();
+        bool embedded0 = CurLogo().StartsWith("data:", StringComparison.OrdinalIgnoreCase);
 
         AddCombo("Logo", new[] { LogoModeNone, LogoModeEtiq, LogoModeCustom },
-            () => mode, v =>
+            CurLogoMode, v =>
             {
+                // …but handlers read the CURRENT object's state at call time
+                string cur = CurLogo();
+                string mode = CurLogoMode();
                 if (v == mode) return;
                 if (v == LogoModeNone)
-                    Push(EditCommand.SetAttrs(o.El, new()
+                    Push(EditCommand.SetAttrs(O.El, new()
                         {
                             ("data-logo", cur == "" ? null : cur, null),
-                            ("data-logo-scale", (string?)o.El.Attribute("data-logo-scale"), null),
+                            ("data-logo-scale", (string?)O.El.Attribute("data-logo-scale"), null),
                         }, "remove qr logo"));
                 else if (v == LogoModeEtiq)
-                    SetAttr(o, "data-logo", "etiq", "set qr logo");
+                    SetAttr(O, "data-logo", "etiq", "set qr logo");
                 else
                 {
                     // straight to the picker; cancel = stay in the old mode
-                    string? picked = PickLogoFile(baseDir);
+                    string? picked = PickLogoFile(BaseDir());
                     if (picked is null) { RefreshValues(); return; }
-                    SetAttr(o, "data-logo", picked, "set qr logo");
+                    SetAttr(O, "data-logo", picked, "set qr logo");
                 }
-                BeginInvoke(new Action(Rebuild));   // rows depend on the mode
+                BeginInvoke(new Action(Reshape));   // rows depend on the mode
             }, hint: "A logo forces ECC H and QR version ≥2; sizing keeps the code scannable.");
 
-        if (mode == LogoModeCustom && !embedded)
+        if (mode0 == LogoModeCustom && !embedded0)
         {
-            AddText("Source", () => (string?)o.El.Attribute("data-logo") ?? "",
+            AddText("Source", CurLogo,
                 v =>
                 {
-                    if (v != "") SetAttr(o, "data-logo", v, "set qr logo");
-                    BeginInvoke(new Action(Rebuild));
+                    if (v != "") SetAttr(O, "data-logo", v, "set qr logo");
+                    BeginInvoke(new Action(Reshape));
                 },
                 hint: "image file path (absolute, or relative to the label file) or an http(s) URL");
             AddButtons(
                 ("Browse…", () =>
                 {
-                    string? picked = PickLogoFile(baseDir);
+                    string? picked = PickLogoFile(BaseDir());
                     if (picked is null) return;
-                    SetAttr(o, "data-logo", picked, "set qr logo");
-                    BeginInvoke(new Action(Rebuild));
+                    SetAttr(O, "data-logo", picked, "set qr logo");
+                    BeginInvoke(new Action(Reshape));
                 }
                 ),
                 ("Embed into template", () =>
                 {
-                    string spec = (string?)o.El.Attribute("data-logo") ?? "";
-                    var bytes = LabelRenderer.FetchLogoBytes(spec, baseDir);
+                    var bytes = LabelRenderer.FetchLogoBytes(CurLogo(), BaseDir());
                     if (bytes is null)
                     {
                         MessageBox.Show(FindForm(), "Could not read the logo image from its source.", "Embed");
@@ -286,20 +536,22 @@ public sealed class InspectorPanel : UserControl
                             $"The image is {bytes.Length / 1024} KB — embedding grows the label file by ~{bytes.Length * 4 / 3 / 1024} KB. Continue?",
                             "Embed", MessageBoxButtons.OKCancel) != DialogResult.OK)
                         return;
-                    SetAttr(o, "data-logo",
+                    SetAttr(O, "data-logo",
                         $"data:{SniffMime(bytes)};base64,{Convert.ToBase64String(bytes)}",
                         "embed qr logo");
-                    BeginInvoke(new Action(Rebuild));
+                    BeginInvoke(new Action(Reshape));
                 }
                 ));
         }
-        else if (mode == LogoModeCustom && embedded)
+        else if (mode0 == LogoModeCustom && embedded0)
         {
-            int comma = cur.IndexOf(',');
-            int kb = comma > 0 ? (cur.Length - comma) * 3 / 4 / 1024 : 0;
+            // shape key carries the URI length, so this caption stays accurate
+            int comma = CurLogo().IndexOf(',');
+            int kb = comma > 0 ? (CurLogo().Length - comma) * 3 / 4 / 1024 : 0;
             AddButtons(($"Extract… (embedded, ~{Math.Max(1, kb)} KB)", () =>
             {
-                var bytes = LabelRenderer.FetchLogoBytes(cur, baseDir);
+                string? baseDir = BaseDir();
+                var bytes = LabelRenderer.FetchLogoBytes(CurLogo(), baseDir);
                 if (bytes is null) return;
                 using var dlg = new SaveFileDialog
                 {
@@ -316,8 +568,8 @@ public sealed class InspectorPanel : UserControl
                             "Point the template at the extracted file instead of the embedded copy?",
                             "Extract", MessageBoxButtons.YesNo) == DialogResult.Yes)
                     {
-                        SetAttr(o, "data-logo", Relativize(dlg.FileName, baseDir), "set qr logo");
-                        BeginInvoke(new Action(Rebuild));
+                        SetAttr(O, "data-logo", Relativize(dlg.FileName, baseDir), "set qr logo");
+                        BeginInvoke(new Action(Reshape));
                     }
                 }
                 catch (Exception ex)
@@ -328,9 +580,9 @@ public sealed class InspectorPanel : UserControl
             ));
         }
 
-        if (mode != LogoModeNone)
-            AddNum("Logo scale %", () => o.GetNum("data-logo-scale"),
-                v => SetAttr(o, "data-logo-scale",
+        if (mode0 != LogoModeNone)
+            AddNum("Logo scale %", () => O.GetNum("data-logo-scale"),
+                v => SetAttr(O, "data-logo-scale",
                     v <= 0 ? null : ((int)Math.Clamp(v, 25, 130)).ToString(), "set logo scale"),
                 step: 5, allowEmpty: true,
                 hint: "empty = FILL (auto-scale to the safe limit); 25-130 = manual % of the reserved box");
@@ -378,7 +630,7 @@ public sealed class InspectorPanel : UserControl
 
     private void BuildMulti()
     {
-        AddHeader($"{_objs.Count} objects selected");
+        AddHeader(() => $"{_objs.Count} objects selected");
         AddNum("X", () => SelBounds().X, v => _doc!.MoveObjects(_objs, v - SelBounds().X, 0));
         AddNum("Y", () => SelBounds().Y, v => _doc!.MoveObjects(_objs, 0, v - SelBounds().Y));
         AddNum("Rotate by", () => 0, v =>
@@ -386,19 +638,18 @@ public sealed class InspectorPanel : UserControl
             if (v % 360 != 0) _doc!.RotateObjects(_objs, v, SelBounds().Center);
         }, step: 15, hint: "degrees clockwise about the selection center; snaps back to 0");
 
-        var texts = _objs.Where(x => x.Kind == ObjectKind.Text).ToList();
-        if (texts.Count == 0) return;
-        AddHeader($"Text ({texts.Count})");
+        if (Texts().Count == 0) return;      // has-text is part of the shape key
+        AddHeader(() => $"Text ({Texts().Count})");
         AddNum("Font size", () =>
         {
-            var sizes = texts.Select(t => t.GetNum("font-size", 12)).Distinct().ToList();
+            var sizes = Texts().Select(t => t.GetNum("font-size", 12)).Distinct().ToList();
             return sizes.Count == 1 ? sizes[0] : 0;
         }, v =>
         {
-            if (v > 0) PushAll(texts, "font-size", N(v), "set font size");
+            if (v > 0) PushAll(Texts(), "font-size", N(v), "set font size");
         }, allowEmpty: true);
-        AddCheck("Bold", () => texts.All(t => t.Bold),
-            v => PushAll(texts, "font-weight", v ? "bold" : null, "set bold"));
+        AddCheck("Bold", () => Texts().All(t => t.Bold),
+            v => PushAll(Texts(), "font-weight", v ? "bold" : null, "set bold"));
     }
 
     // ---------- edit plumbing (all through the undo stack) ----------
@@ -473,17 +724,44 @@ public sealed class InspectorPanel : UserControl
         _table.RowCount++;
     }
 
-    private void AddHeader(string text)
+    private Font? _boldFont;   // one shared instance — a new Font per header leaked a GDI handle per rebuild
+
+    /// <summary>Header whose text depends on the selected object (kind ·
+    /// layer, counts): refreshed like a value so the cached panel stays
+    /// correct for whichever element it is showing.</summary>
+    private void AddHeader(Func<string> get)
+    {
+        var l = AddHeaderLabel("");
+        _refreshers.Add(() => l.Text = get());
+    }
+
+    private void AddHeader(string text) => AddHeaderLabel(text);
+
+    private Label AddHeaderLabel(string text)
     {
         var l = new Label
         {
             Text = text, AutoSize = true, Padding = new Padding(0, 8, 0, 2),
-            Font = new Font(Font, FontStyle.Bold),
+            Font = _boldFont ??= new Font(Font, FontStyle.Bold),
         };
         _table.Controls.Add(l, 0, _table.RowCount);
         _table.SetColumnSpan(l, 2);
         _table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _table.RowCount++;
+        return l;
+    }
+
+    /// <summary>Read-only, live-refreshed status row (encode feedback).</summary>
+    private void AddStatus(string label, Func<string> get, string? hint = null)
+    {
+        AddLabelCell(label);
+        var l = new Label
+        {
+            AutoSize = false, Dock = DockStyle.Fill, AutoEllipsis = true,
+            TextAlign = ContentAlignment.MiddleLeft, ForeColor = SystemColors.GrayText,
+        };
+        _refreshers.Add(() => l.Text = get());
+        FinishRow(l, hint);
     }
 
     private void AddInfo(string caption, string text)
@@ -597,6 +875,15 @@ public sealed class InspectorPanel : UserControl
             string v = get();
             if (!editable && !cb.Items.Contains(v)) cb.Items.Add(v);
             cb.Text = v;
+            // setting ComboBox.Text selects it all, and the blue highlight
+            // sticks even without focus — clear it. EDITABLE combos only:
+            // a DropDownList has no edit control, and its SelectionStart
+            // returns garbage / throws ArgumentOutOfRange when set
+            if (editable)
+            {
+                cb.SelectionStart = cb.Text.Length;
+                cb.SelectionLength = 0;
+            }
         }
         void Commit()
         {

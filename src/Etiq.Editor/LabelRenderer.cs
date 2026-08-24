@@ -76,7 +76,9 @@ public static class LabelRenderer
                         (string?)o.El.Attribute("data-ecc"),
                         (int)o.GetNum("data-columns", 0),
                         (string?)o.El.Attribute("data-logo"), baseDir,
-                        (int)o.GetNum("data-logo-scale", 0));
+                        (int)o.GetNum("data-logo-scale", 0),
+                        (string?)o.El.Attribute("data-dmshape") == "rect",
+                        (string?)o.El.Attribute("data-hri"));
                     break;
                 }
                 case ObjectKind.Text:
@@ -217,19 +219,57 @@ public static class LabelRenderer
         g.Restore(st);
     }
 
-    /// <summary>Symbologies with a real encoder today; everything else
-    /// (iqr — proprietary, no open decoder to verify against) shows a
+    /// <summary>Symbologies with a real encoder today; anything else (e.g.
+    /// a legacy template naming a symbology we dropped, like iqr) shows a
     /// placeholder in the editor and is skipped on print.</summary>
     public static bool IsImplemented(string? symbology) =>
-        symbology is "code128" or "code39" or "code39ext"
-                  or "qr" or "datamatrix" or "pdf417";
+        symbology is "code128" or "code39" or "code39ext" or "gs1-128" or "itf14"
+                  or "qr" or "rmqr" or "aztec" or "datamatrix" or "pdf417";
+
+    /// <summary>The exact rect the renderer draws for a qr/datamatrix
+    /// element inside its current box (largest square modules, centered) —
+    /// the target for the tight-box (data-tight="1") snap. Null when not a
+    /// 2D-square symbology, the box is degenerate, or it is already tight.
+    /// Unknown content (unresolved field): falls back to squaring the box.</summary>
+    public static RectD? TightBarcodeRect(EditorObject o, ITextMeasurer measurer)
+    {
+        string sym = (string?)o.El.Attribute("data-barcode") ?? "";
+        if (sym is not ("qr" or "datamatrix" or "aztec" or "rmqr")) return null;
+        var b = o.Bounds(measurer);
+        if (b.W <= 0 || b.H <= 0) return null;
+        // same fallback chain the canvas draws with, so the snap target
+        // matches the symbol on screen even for field-bound elements
+        string content = (string?)o.El.Attribute("data-value")
+            ?? (string?)o.El.Attribute("data-field") ?? "SAMPLE";
+        bool withLogo = sym == "qr" && !string.IsNullOrEmpty((string?)o.El.Attribute("data-logo"));
+        var m = string.IsNullOrEmpty(content) ? null
+            : TryEncodeMatrix(sym, content,
+                withLogo ? "H" : (string?)o.El.Attribute("data-ecc"),
+                0, withLogo ? 2 : 1,
+                (string?)o.El.Attribute("data-dmshape") == "rect",
+                b.W / b.H);   // same aspect rule as the draw, so the snap matches
+        double w, h;
+        if (m is null)
+        {
+            w = h = Math.Min(b.W, b.H);
+        }
+        else
+        {
+            int mh = m.GetLength(0), mw = m.GetLength(1);
+            double s = Math.Min(b.W / mw, b.H / mh);
+            w = mw * s; h = mh * s;
+        }
+        if (Math.Abs(w - b.W) < 0.01 && Math.Abs(h - b.H) < 0.01) return null;
+        return new(b.X + (b.W - w) / 2, b.Y + (b.H - h) / 2, w, h);
+    }
 
     /// <summary>Encode a 2D symbology to its module matrix; null when the
     /// symbology is linear/unknown or the content doesn't fit. ecc applies
     /// to qr (L|M|Q|H, default M); columns to pdf417 (1-30, default 6).</summary>
     public static bool[,]? TryEncodeMatrix(string? symbology, string content,
                                            string? ecc = null, int columns = 0,
-                                           int minVersion = 1)
+                                           int minVersion = 1, bool dmRect = false,
+                                           double dmAspect = 0)
     {
         try
         {
@@ -238,7 +278,10 @@ public static class LabelRenderer
                 "qr" => Etiq.Core.QrCode.Encode(content,
                             string.IsNullOrEmpty(ecc) ? 'M' : char.ToUpperInvariant(ecc[0]),
                             minVersion),
-                "datamatrix" => Etiq.Core.DataMatrix.Encode(content),
+                "datamatrix" => Etiq.Core.DataMatrix.Encode(content, dmRect, dmAspect),
+                // rmqr picks its version by the box aspect too; ecc M|H
+                "rmqr" => Etiq.Core.Rmqr.Encode(content, ecc == "H", dmAspect),
+                "aztec" => Etiq.Core.Aztec.Encode(content),
                 "pdf417" => Etiq.Core.Pdf417.Encode(content,
                             columns is >= 1 and <= 30 ? columns : 6),
                 _ => null,
@@ -255,20 +298,68 @@ public static class LabelRenderer
     public static bool DrawBarcode(Graphics g, RectD box, string? symbology,
                                    string content, string? ecc = null, int columns = 0,
                                    string? logo = null, string? baseDir = null,
-                                   int logoScale = 0)
+                                   int logoScale = 0, bool dmRect = false,
+                                   string? hri = null)
     {
         if (string.IsNullOrEmpty(content)) return false;
         var mods = TryEncode(symbology, content);
-        if (mods is not null) { DrawBars(g, box, mods); return true; }
+        if (mods is not null)
+        {
+            // HRI (data-hri below|above): reserve a text band inside the
+            // box so the overall element footprint never changes
+            var barBox = box;
+            if (hri is "below" or "above")
+            {
+                double band = Math.Min(box.H * 0.25, 150);   // mils
+                barBox = hri == "below"
+                    ? new RectD(box.X, box.Y, box.W, box.H - band)
+                    : new RectD(box.X, box.Y + band, box.W, box.H - band);
+                DrawHri(g, hri == "below"
+                        ? new RectD(box.X, box.Bottom - band, box.W, band)
+                        : new RectD(box.X, box.Y, box.W, band),
+                    HriText(symbology, content));
+            }
+            DrawBars(g, barBox, mods);
+            return true;
+        }
         bool withLogo = symbology == "qr" && !string.IsNullOrEmpty(logo);
         // a logo forces ECC H AND version ≥2: v1's 21-module grid can't
         // spare a readable-size keepout even at H
         var m = TryEncodeMatrix(symbology, content, withLogo ? "H" : ecc, columns,
-                                withLogo ? 2 : 1);
+                                withLogo ? 2 : 1, dmRect,
+                                box.H > 0 ? box.W / box.H : 0);   // box aspect picks the rect size
         if (m is null) return false;
-        var drawn = DrawMatrix(g, box, m, keepSquare: symbology is "qr" or "datamatrix");
+        var drawn = DrawMatrix(g, box, m,
+            keepSquare: symbology is "qr" or "datamatrix" or "aztec" or "rmqr");
         if (withLogo) DrawQrLogo(g, drawn, m.GetLength(0), logo!, baseDir, logoScale);
         return true;
+    }
+
+    /// <summary>What the human-readable line SHOWS: for itf14 the digits
+    /// actually encoded (check digit / padding included — the whole point
+    /// of HRI); gs1-128 and the rest show the content as typed (GS1 HRI
+    /// convention keeps the (AI) parentheses).</summary>
+    public static string HriText(string? symbology, string content) =>
+        symbology == "itf14" && Etiq.Core.Itf.CanEncode(content)
+            ? Etiq.Core.Itf.Normalize(content)
+            : content;
+
+    /// <summary>Centered single-line HRI text: sized to the band height,
+    /// squeezed horizontally when the box is narrower than the text (same
+    /// squeeze rule as data-width text).</summary>
+    private static void DrawHri(Graphics g, RectD band, string text)
+    {
+        if (text.Length == 0 || band.W <= 0 || band.H <= 0) return;
+        using var font = new Font("Arial", (float)(band.H * 0.78), GraphicsUnit.Pixel);
+        var sz = g.MeasureString(text, font, PointF.Empty, StringFormat.GenericTypographic);
+        if (sz.Width <= 0) return;
+        float squeeze = sz.Width > band.W ? (float)(band.W / sz.Width) : 1f;
+        var st = g.Save();
+        g.TranslateTransform((float)(band.X + band.W / 2), (float)(band.Y + band.H / 2));
+        g.ScaleTransform(squeeze, 1f);
+        g.DrawString(text, font, Brushes.Black,
+            -sz.Width / 2, -sz.Height / 2, StringFormat.GenericTypographic);
+        g.Restore(st);
     }
 
     /// <summary>Render a module matrix into the box, merging horizontal
@@ -458,6 +549,10 @@ public static class LabelRenderer
                     => Etiq.Core.Code39.Modules(content),
                 "code39ext" when Etiq.Core.Code39.CanEncode(content, extended: true)
                     => Etiq.Core.Code39.Modules(content, extended: true),
+                "gs1-128" when Etiq.Core.Gs1128.CanEncode(content)
+                    => Etiq.Core.Gs1128.Modules(content),
+                "itf14" when Etiq.Core.Itf.CanEncode(content)
+                    => Etiq.Core.Itf.Modules(content),
                 _ => null,
             };
         }

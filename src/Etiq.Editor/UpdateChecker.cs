@@ -68,39 +68,85 @@ public static class UpdateChecker
         return false;
     }
 
-    /// <summary>Update flavor preference, stored in
-    /// %APPDATA%\Etiquette\settings.json: "auto" (default — match the
+    // ---------- settings store ----------
+    // %APPDATA%\Etiquette\settings.json — read-merge-write, so each setting
+    // can be saved independently without clobbering the others.
+
+    private static Dictionary<string, string> LoadSettings()
+    {
+        var d = new Dictionary<string, string>();
+        try
+        {
+            if (File.Exists(SettingsPath))
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(SettingsPath));
+                foreach (var p in doc.RootElement.EnumerateObject())
+                {
+                    if (p.Value.ValueKind == JsonValueKind.String)
+                        d[p.Name] = p.Value.GetString() ?? "";
+                    else if (p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                        d[p.Name] = p.Value.GetBoolean() ? "true" : "false";
+                    // null / other kinds: treat as absent
+                }
+            }
+        }
+        catch { /* fresh settings */ }
+        return d;
+    }
+
+    private static void SaveSetting(string key, string? value)
+    {
+        try
+        {
+            var d = LoadSettings();
+            if (value is null) d.Remove(key);
+            else d[key] = value;
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(SettingsPath)!);
+            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(d));
+        }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>Update flavor preference: "auto" (default — match the
     /// running build, but a standalone install with the runtime present is
     /// OFFERED the lighter build) | "standalone" | "framework".</summary>
     public static string UpdateFlavor
     {
-        get
+        get => LoadSettings().TryGetValue("updateFlavor", out var v) &&
+               v is "standalone" or "framework" ? v : "auto";
+        set => SaveSetting("updateFlavor", value == "auto" ? null : value);
+    }
+
+    /// <summary>A release version the user chose to skip ("0.6.0"-style,
+    /// null = none). The silent startup check stays quiet about exactly
+    /// this version; a NEWER release clears the skip implicitly, and an
+    /// explicit Help → Check for Updates always shows what it finds.</summary>
+    public static string? SkipVersion
+    {
+        get => LoadSettings().TryGetValue("skipVersion", out var v) && v != "" ? v : null;
+        set => SaveSetting("skipVersion", value);
+    }
+
+    /// <summary>Automatic update check at startup (default on). Off =
+    /// updates are only ever found via Help → Check for Updates.</summary>
+    public static bool AutoCheck
+    {
+        get => !(LoadSettings().TryGetValue("autoUpdateCheck", out var v) && v == "false");
+        set => SaveSetting("autoUpdateCheck", value ? null : "false");
+    }
+
+    /// <summary>CHANGELOG.md from the repo's default branch — shown in the
+    /// update dialog. Null on any failure (the dialog copes).</summary>
+    public static async Task<string?> FetchChangelogAsync(string repo = Repo)
+    {
+        try
         {
-            try
-            {
-                if (File.Exists(SettingsPath))
-                {
-                    using var doc = JsonDocument.Parse(File.ReadAllText(SettingsPath));
-                    if (doc.RootElement.TryGetProperty("updateFlavor", out var f))
-                    {
-                        string? v = f.GetString();
-                        if (v is "standalone" or "framework") return v;
-                    }
-                }
-            }
-            catch { /* default */ }
-            return "auto";
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("etiqedit-update-check");
+            return await http.GetStringAsync(
+                $"https://raw.githubusercontent.com/{repo}/main/CHANGELOG.md");
         }
-        set
-        {
-            try
-            {
-                Directory.CreateDirectory(System.IO.Path.GetDirectoryName(SettingsPath)!);
-                File.WriteAllText(SettingsPath, JsonSerializer.Serialize(
-                    new { updateFlavor = value == "auto" ? null : value }));
-            }
-            catch { /* best-effort */ }
-        }
+        catch { return null; }
     }
 
     private static string SettingsPath => System.IO.Path.Combine(

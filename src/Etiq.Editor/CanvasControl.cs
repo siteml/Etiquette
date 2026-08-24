@@ -43,6 +43,11 @@ public sealed class CanvasControl : Control
     // members, the FIRST click outside exits the mode without dragging
     private System.Xml.Linq.XElement? _editGroup;
     private bool _dragging, _panning, _marquee;
+    // click-vs-drag: a mouse-down only ARMS the drag; it starts once the
+    // pointer travels past a small screen-space threshold, so selecting an
+    // element never nudges it by a pixel or two of hand jitter
+    private bool _dragPending;
+    private Point _downScreen;
     private Point _panLast;
     private PointD _dragStartW;
     private RectD _dragOrigBounds;
@@ -104,6 +109,15 @@ public sealed class CanvasControl : Control
     }
 
     private PointD ToWorld(Point p) => new((p.X - Pan.X) / Zoom, (p.Y - Pan.Y) / Zoom);
+
+    /// <summary>A selected object under the cursor, if any — selection
+    /// overrides z-order so buried elements can be dug out via the outline
+    /// and then dragged on the canvas. Skips detached (deleted) elements
+    /// and objects on hidden/locked layers.</summary>
+    private EditorObject? SelectionFirstHit(PointD w) =>
+        _sel.FirstOrDefault(s => s.El.Parent is not null &&
+            (s.Layer is not { } l || (l.Visible && !l.Locked)) &&
+            s.HitTest(w, 3 / Zoom, _measurer));
 
     private bool InSelection(EditorObject o) => _sel.Any(s => s.El == o.El);
 
@@ -261,7 +275,9 @@ public sealed class CanvasControl : Control
                     (int)o.GetNum("data-columns", 0),
                     (string?)o.El.Attribute("data-logo"),
                     _doc?.Path is { } dp ? System.IO.Path.GetDirectoryName(dp) : null,
-                    (int)o.GetNum("data-logo-scale", 0));
+                    (int)o.GetNum("data-logo-scale", 0),
+                    (string?)o.El.Attribute("data-dmshape") == "rect",
+                    (string?)o.El.Attribute("data-hri"));
                 if (!drawn)
                 {
                     using var hatch = new System.Drawing.Drawing2D.HatchBrush(
@@ -363,7 +379,7 @@ public sealed class CanvasControl : Control
         if (e.Button == MouseButtons.Right && Mode == EditorMode.Design)
         {
             var wr = ToWorld(e.Location);
-            var rHit = _doc.HitTest(wr, 3 / Zoom);
+            var rHit = SelectionFirstHit(wr) ?? _doc.HitTest(wr, 3 / Zoom);
             if (rHit is not null)
             {
                 if (_editGroup is not null &&
@@ -396,7 +412,7 @@ public sealed class CanvasControl : Control
             int? end = D(p1) <= r ? 1 : D(p2) <= r ? 2 : null;
             if (end is not null)
             {
-                _lineEnd = end; _dragging = true; _dragStartW = w;
+                _lineEnd = end; _dragPending = true; _downScreen = e.Location; _dragStartW = w;
                 Capture = true; return;
             }
         }
@@ -408,12 +424,15 @@ public sealed class CanvasControl : Control
                 Selected.RotationDeg, Selected.RotationPivot, r);
             if (h is not null && h != Core.Handle.Rotate)
             {
-                _dragHandle = h; _dragging = true; _dragStartW = w;
+                _dragHandle = h; _dragPending = true; _downScreen = e.Location; _dragStartW = w;
                 Capture = true; return;
             }
         }
 
-        var hit = _doc.HitTest(w, 3 / Zoom);
+        // the CURRENT selection wins over z-order: an element selected from
+        // the outline (or already selected) stays clickable/draggable even
+        // when buried under others at this point
+        var hit = SelectionFirstHit(w) ?? _doc.HitTest(w, 3 / Zoom);
         bool ctrl = ModifierKeys.HasFlag(Keys.Control);
 
         // group-edit mode bookkeeping: drop it when the group is gone
@@ -475,7 +494,7 @@ public sealed class CanvasControl : Control
                 SelectMany(members);
         }
 
-        _dragHandle = null; _dragging = true; _dragStartW = w;
+        _dragHandle = null; _dragPending = true; _downScreen = e.Location; _dragStartW = w;
         _dragOrigBounds = SelectionBounds();
         _appliedDx = _appliedDy = 0;
         Capture = true;
@@ -697,8 +716,10 @@ public sealed class CanvasControl : Control
     {
         base.OnMouseEnter(e);
         // wheel zoom needs keyboard focus; take it when the pointer arrives
-        // (only while our own window is active - never steal across apps)
-        if (!Focused && FindForm() is { ContainsFocus: true }) Focus();
+        // (only while our own window is active - never steal across apps,
+        // and NEVER from the inline text editor: stealing its focus fires
+        // LostFocus and closes it the moment the mouse re-enters the canvas)
+        if (_inlineEdit is null && !Focused && FindForm() is { ContainsFocus: true }) Focus();
     }
 
     /// <summary>The selection UNIT under `context`: the outermost plain
@@ -764,7 +785,8 @@ public sealed class CanvasControl : Control
             Multiline = true, AcceptsReturn = true, WordWrap = false,
             BorderStyle = BorderStyle.FixedSingle,
             Bounds = new Rectangle(x - 3, y - 3, w, h),
-            Text = o.El.Value,
+            // model stores \n; a WinForms TextBox only RENDERS \r\n breaks
+            Text = o.El.Value.Replace("\n", "\r\n"),
         };
         try
         {
@@ -803,7 +825,10 @@ public sealed class CanvasControl : Control
         _inlineTarget = null;
         string text = tb.Text.Replace("\r\n", "\n");
         Controls.Remove(tb);
+        var editFont = tb.Font;    // per-edit Font — TextBox.Dispose doesn't own it
         tb.Dispose();
+        // unknown-family fallback leaves the AMBIENT font in place — never dispose that
+        if (!ReferenceEquals(editFont, Font)) editFont.Dispose();
         if (commit && o is not null && _doc is not null && text != o.El.Value)
         {
             _doc.Undo.Push(o.SetText(text));
@@ -826,6 +851,16 @@ public sealed class CanvasControl : Control
         if (_marquee)
         {
             _marqueeEndW = w; Invalidate(); return;
+        }
+        if (_dragPending)
+        {
+            // still inside the click dead-zone: not a drag yet
+            int tx = Math.Max(SystemInformation.DragSize.Width, 8) / 2;
+            int ty = Math.Max(SystemInformation.DragSize.Height, 8) / 2;
+            if (Math.Abs(e.X - _downScreen.X) <= tx &&
+                Math.Abs(e.Y - _downScreen.Y) <= ty) return;
+            _dragPending = false;
+            _dragging = true;
         }
         if (!_dragging || _doc is null || _sel.Count == 0) return;
 
@@ -921,7 +956,18 @@ public sealed class CanvasControl : Control
                 { _sel.Clear(); _sel.AddRange(inside); }
             SelectionChanged?.Invoke(Selected);
         }
-        _dragging = false; _panning = false; _marquee = false; _dragHandle = null;
+        // tight-box barcodes (data-tight="1"): at the end of a resize
+        // gesture, snap the box to the exact symbol the renderer draws —
+        // same mergeKey as the drag, so the whole gesture is ONE undo step
+        if (_dragging && _dragHandle is not null && _doc is not null && _sel.Count == 1
+            && Selected!.Kind == ObjectKind.Barcode
+            && (string?)Selected.El.Attribute("data-tight") == "1"
+            && LabelRenderer.TightBarcodeRect(Selected, _measurer) is { } tight)
+        {
+            _doc.Undo.Push(Selected.Resize(tight, _measurer));
+            SelectionChanged?.Invoke(Selected);
+        }
+        _dragging = false; _dragPending = false; _panning = false; _marquee = false; _dragHandle = null;
         _lineEnd = null;
         _guides = new();
         Capture = false;

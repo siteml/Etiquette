@@ -1,9 +1,31 @@
 # Roadmap
 
-Where Etiquette is and where it's going. Current release: **v0.5.0**
+Where Etiquette is and where it's going. Current release: **v0.6.0**
 (see the Releases page; `etiqedit` checks it via Help → Check for Updates).
 
 Legend: `[x]` done · `[~]` partially done · `[ ]` not started.
+
+## Shipped — v0.6.0
+
+- [x] **Four new symbologies, decode-verified** — GS1-128 (parenthesized
+      AI syntax, automatic FNC1 separators), ITF-14 (automatic GS1 check
+      digit), rMQR (ISO/IEC 23941, all 32 versions; version follows the
+      target box aspect), and Aztec (ISO/IEC 24778, compact and full).
+      `iqr` was removed: the spec was never published openly and no open
+      decoder exists to verify against — `rmqr` covers rectangular needs.
+- [x] **Rectangular DataMatrix** — the six ECC200 rectangle formats
+      (8x18 … 16x48), selected by the target box aspect
+      (`data-dmshape="rect"`).
+- [x] **HRI rendering** — `data-hri="below|above"` now draws the
+      human-readable line inside the target box for all linear codes
+      (for ITF-14 it shows the digits actually encoded, check digit
+      included).
+- [x] **Editor: tight bounding boxes** — 2D symbols can keep their box
+      snapped to the exact drawn symbol through resizes (`data-tight`).
+- [x] **Editor performance & feel** — inspector control-set caching
+      (instant selection switching), leak fixes (snappy exit), click
+      dead-zone (no accidental nudges), selection-over-z-order digging,
+      fit-none clip-edge handles, inline multiline editing fixes.
 
 ## Shipped — v0.5.0
 

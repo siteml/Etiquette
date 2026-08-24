@@ -372,8 +372,17 @@ public static class TemplateValidator
             {
                 if (becc is not ("L" or "M" or "Q" or "H"))
                     Err("barcode-ecc", $"barcode '{sym}': data-ecc must be L|M|Q|H, got '{becc}'");
-                if (sym != "qr")
-                    Warn("barcode-ecc", $"barcode '{sym}': data-ecc only applies to qr");
+                if (sym == "rmqr" && becc is not ("M" or "H"))
+                    Err("barcode-ecc", $"barcode '{sym}': rmqr supports only data-ecc M|H, got '{becc}'");
+                if (sym is not ("qr" or "rmqr"))
+                    Warn("barcode-ecc", $"barcode '{sym}': data-ecc only applies to qr and rmqr");
+            }
+            if ((string?)b.El.Attribute("data-dmshape") is { } dsh)
+            {
+                if (dsh is not ("rect" or "square"))
+                    Err("barcode-dmshape", $"barcode '{sym}': data-dmshape must be rect|square, got '{dsh}'");
+                if (sym != "datamatrix")
+                    Warn("barcode-dmshape", $"barcode '{sym}': data-dmshape only applies to datamatrix");
             }
             if ((string?)b.El.Attribute("data-columns") is { } bcols)
             {

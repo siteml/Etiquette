@@ -11,8 +11,15 @@ public sealed class EtiqTemplate
 {
     public static readonly XNamespace Svg = "http://www.w3.org/2000/svg";
     public static readonly XNamespace Ns = "https://etiquette.dev/ns/0.1";
+    // iqr removed: Denso Wave never published the iQR spec openly (unlike
+    // QR/ISO 18004) and no open decoder exists — unimplementable AND
+    // unverifiable. Rectangular needs are covered by DataMatrix rect
+    // formats (rMQR / ISO 23941 is the open candidate if a rectangular QR
+    // is ever wanted). Legacy templates naming iqr still validate as
+    // unknown-symbology and render the placeholder.
     public static readonly string[] Symbologies =
-        { "code39", "code39ext", "code128", "datamatrix", "qr", "pdf417", "iqr" };
+        { "code39", "code39ext", "code128", "gs1-128", "itf14",
+          "datamatrix", "qr", "rmqr", "aztec", "pdf417" };
     /// <summary>Source kinds the engine implements.</summary>
     public static readonly string[] SourceKinds =
         { "epicor", "rest", "prompt", "serial", "auto", "fixed", "compose", "list" };

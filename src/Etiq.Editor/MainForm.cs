@@ -50,9 +50,10 @@ public sealed class MainForm : Form
         if (openPath is not null && File.Exists(openPath)) OpenFile(openPath);
 
         // silent startup update check, only when the build ships a repo
+        // and the user hasn't turned it off (Help → Options)
         Shown += async (_, _) =>
         {
-            if (UpdateChecker.Configured)
+            if (UpdateChecker.Configured && UpdateChecker.AutoCheck)
                 await CheckForUpdates(interactive: false);
         };
     }
@@ -69,6 +70,19 @@ public sealed class MainForm : Form
     /// browser download.</summary>
     private async Task OfferUpdate(UpdateChecker.Release rel)
     {
+        // the update-available window shows the rendered CHANGELOG.md with
+        // Install / Skip this version / Later — the changelog IS the pitch
+        string? changelog = await UpdateChecker.FetchChangelogAsync();
+        switch (UpdateDialogs.ShowChangelog(this, rel.Tag,
+                    UpdateChecker.Current.ToString(3), changelog))
+        {
+            case UpdateChoice.SkipVersion:
+                UpdateChecker.SkipVersion = rel.Version.ToString(3);
+                return;
+            case UpdateChoice.Later:
+                return;
+        }
+
         string pref = UpdateChecker.UpdateFlavor;
         bool wantStandalone;
         if (pref == "standalone") wantStandalone = true;
@@ -90,18 +104,14 @@ public sealed class MainForm : Form
 
         // in-place install needs a direct asset AND a writable install
         // folder; otherwise it's a browser download like before
+        // "Install now" was already confirmed on the changelog dialog
         bool inPlace = assetUrl is not null && UpdateApplier.CanSelfUpdate;
-        string offer = inPlace
-            ? $"Install {assetName} now?\n\netiqedit restarts when it finishes."
-            : assetUrl is not null
-                ? $"Download {assetName}?\n\n(The install folder isn't writable, so the update can't be applied automatically.)"
-                : "Open the download page?";
-        if (MessageBox.Show(this,
-                $"Version {rel.Tag} is available (you have v{UpdateChecker.Current.ToString(3)}).\n\n" + offer,
-                "Update available", MessageBoxButtons.YesNo) != DialogResult.Yes)
-            return;
         if (!inPlace)
         {
+            MessageBox.Show(this, assetUrl is not null
+                    ? "The install folder isn't writable, so the update can't be applied automatically — opening the download instead."
+                    : "No direct download asset was found — opening the release page.",
+                "Update");
             string target = assetUrl ?? rel.Url;
             if (target != "")
                 System.Diagnostics.Process.Start(
@@ -181,6 +191,12 @@ public sealed class MainForm : Form
             }
             if (rel.Version > UpdateChecker.Current)
             {
+                // "skip this version" quiets the STARTUP check for exactly
+                // that release; an explicit menu check always shows it,
+                // and any newer release shows again automatically
+                if (!interactive &&
+                    UpdateChecker.SkipVersion == rel.Version.ToString(3))
+                    return;
                 await OfferUpdate(rel);
             }
             else if (interactive)
@@ -325,7 +341,10 @@ public sealed class MainForm : Form
                 menu.Show(_outline, e.Location);
             }
         };
-        _props.Changed += () => { _canvas.Invalidate(); RefreshOutline(); };
+        // outline refresh rides on Undo.Changed → OutlineMaybeRefresh (signature-
+        // guarded); an unconditional RefreshOutline here rebuilt the whole tree
+        // on every inspector commit — extra flicker for nothing
+        _props.Changed += () => _canvas.Invalidate();
     }
 
     private void BuildMenu()
@@ -345,8 +364,9 @@ public sealed class MainForm : Form
         file.DropDownItems.Add("E&xit", null, (_, _) => Close());
 
         var edit = new ToolStripMenuItem("&Edit");
-        edit.DropDownItems.Add("&Undo", null, (_, _) => { _doc?.Undo.Undo(); RefreshOutline(); }).ShortcutKeys(Keys.Control | Keys.Z);
-        edit.DropDownItems.Add("&Redo", null, (_, _) => { _doc?.Undo.Redo(); RefreshOutline(); }).ShortcutKeys(Keys.Control | Keys.Y);
+        // Undo.Changed already runs OutlineMaybeRefresh — only the canvas needs a poke
+        edit.DropDownItems.Add("&Undo", null, (_, _) => { _doc?.Undo.Undo(); _canvas.Invalidate(); }).ShortcutKeys(Keys.Control | Keys.Z);
+        edit.DropDownItems.Add("&Redo", null, (_, _) => { _doc?.Undo.Redo(); _canvas.Invalidate(); }).ShortcutKeys(Keys.Control | Keys.Y);
         edit.DropDownItems.Add(new ToolStripSeparator());
         edit.DropDownItems.Add("&Group", null, (_, _) => GroupSelection()).ShortcutKeys(Keys.Control | Keys.G);
         edit.DropDownItems.Add("U&ngroup", null, (_, _) => UngroupSelection()).ShortcutKeys(Keys.Control | Keys.Shift | Keys.G);
@@ -377,6 +397,7 @@ public sealed class MainForm : Form
 
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add("Check for &Updates…", null, async (_, _) => await CheckForUpdates(interactive: true));
+        help.DropDownItems.Add("&Options…", null, (_, _) => UpdateDialogs.ShowOptions(this));
         help.DropDownItems.Add(new ToolStripSeparator());
         help.DropDownItems.Add("&About Etiquette…", null, (_, _) => ShowAbout());
 
@@ -459,9 +480,9 @@ public sealed class MainForm : Form
                 new System.Xml.Linq.XAttribute("x", N(cx - 750)),
                 new System.Xml.Linq.XAttribute("y", N(cy - 250)),
                 new System.Xml.Linq.XAttribute("width",
-                    N(symbology is "qr" or "iqr" or "datamatrix" ? 800 : 1500)),
+                    N(symbology is "qr" or "datamatrix" or "aztec" ? 800 : 1500)),
                 new System.Xml.Linq.XAttribute("height",
-                    N(symbology is "qr" or "iqr" or "datamatrix" ? 800 : 500)),
+                    N(symbology is "qr" or "datamatrix" or "aztec" ? 800 : 500)),
                 new System.Xml.Linq.XAttribute("data-barcode", symbology),
                 new System.Xml.Linq.XAttribute("data-value", "12345678")),
             "line" => new(ns + "line",
@@ -720,7 +741,11 @@ public sealed class MainForm : Form
     private void OutlineMaybeRefresh()
     {
         if (OutlineSignature() != _outlineSig) RefreshOutline();
-        _props.RefreshValues(); // keep X/Y/rotation live during drags and undo/redo
+        // ShowSelection is now cheap when nothing structural changed (it
+        // just re-reads values) — and it also swaps in the right row set
+        // when an undo/redo changed a structural attribute (symbology,
+        // logo mode), which plain RefreshValues left stale
+        _props.ShowSelection(_doc, _canvas.Selection);
     }
 
     private static bool IsPlainGroup(System.Xml.Linq.XElement e) =>

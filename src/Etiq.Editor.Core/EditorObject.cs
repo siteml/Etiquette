@@ -79,8 +79,11 @@ public sealed class EditorObject
                 double h = size + (lines.Length - 1) * lineH;
                 double boxH = GetNum("data-height", 0);
                 // fixed-box fit: the box IS the bounds (content shrinks into
-                // it); otherwise the box may be taller (valign room)
-                h = FitMode == "box" && boxH > 0 ? boxH : Math.Max(h, boxH);
+                // it). fit "none" with a data-height: the box IS the bounds
+                // too — content CLIPS to it, so the handles must sit on the
+                // clip edge (a shorter box than the text is legal). Only
+                // "width" keeps Max: there data-height is valign room.
+                h = boxH > 0 && FitMode is "box" or "none" ? boxH : Math.Max(h, boxH);
                 double x = GetNum("x");
                 double topY = GetNum("y") - size * 0.8;   // first baseline → approx top
                 return TextAnchor switch

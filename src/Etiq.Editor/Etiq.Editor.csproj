@@ -10,7 +10,7 @@
     <AssemblyName>etiqedit</AssemblyName>
     <!-- bump per release; Check for Updates compares this against the
          latest GitHub release tag (vX.Y.Z) -->
-    <Version>0.5.0</Version>
+    <Version>0.6.0</Version>
     <!-- lets the shell compile-check on non-Windows build agents;
          harmless on Windows -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
@@ -29,9 +29,7 @@
     <!-- square icon: the data-logo="etiq" QR center overlay -->
     <EmbeddedResource Include="..\..\assets\icon.png" LogicalName="etiq.icon.png" />
     <!-- shipped metadata templates (Insert Template in the F4 dialog) -->
-    <None Include="..\..\snippets\*.snippet.xml"
-          CopyToOutputDirectory="PreserveNewest"
-          Link="snippets\%(Filename)%(Extension)" />
+    <None Include="..\..\snippets\*.snippet.xml" CopyToOutputDirectory="PreserveNewest" Link="snippets\%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>

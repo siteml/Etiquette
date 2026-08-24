@@ -115,18 +115,39 @@ A placeholder `<rect>` marks the barcode's position and target box:
       data-hri="below"/>
 ```
 
-- `data-barcode`: `code39 | code39ext | code128 | datamatrix | qr | pdf417 | iqr`
-  — all implemented with dependency-free encoders except `iqr`
-  (proprietary; no open decoder exists to verify against — prefer `qr`)
+- `data-barcode`: `code39 | code39ext | code128 | gs1-128 | itf14 |
+  datamatrix | qr | rmqr | aztec | pdf417` — all implemented with
+  dependency-free, decode-verified encoders. (`iqr` was dropped in 0.6:
+  Denso Wave never published the spec openly and no open decoder exists —
+  use `rmqr` for rectangular or `qr` for square symbols.)
+  - `gs1-128`: content uses parenthesized GS1 Application Identifiers,
+    e.g. `(01)09501101530003(10)LOT42`; FNC1 separators are inserted
+    automatically after variable-length AIs, and fixed-length AIs are
+    validated against the GS1 predefined-length table.
+  - `itf14`: interleaved 2 of 5, digits only; exactly 13 digits get the
+    GS1 check digit appended automatically; odd lengths are left
+    zero-padded.
+  - `rmqr`: rectangular QR (ISO/IEC 23941, R7x43 … R17x139); the symbol
+    version is chosen automatically to best match the target box aspect.
+  - `aztec`: ISO/IEC 24778, compact and full symbols; needs no quiet zone.
 - `data-field`: data source for the symbol content (or `data-value` for fixed)
-- `data-hri`: `none | below | above` human-readable interpretation
+- `data-hri`: `none | below | above` human-readable interpretation (linear
+  symbologies; rendered inside the target box — for `itf14` the HRI shows
+  the digits actually encoded, check digit included)
 - `data-module-mils` (optional): minimum X-dimension in mils; the engine
   refuses/warns when the target printer cannot honor it (dot-snapping rule —
   see PRINTING).
-- `data-ecc` (qr only, optional): error-correction level `L | M | Q | H`;
-  default `M`.
+- `data-ecc` (qr and rmqr, optional): error-correction level `L | M | Q | H`
+  (rmqr supports only `M | H`); default `M`.
 - `data-columns` (pdf417 only, optional): data columns 1-30, default 6 —
   more columns = wider and fewer rows.
+- `data-dmshape` (datamatrix only, optional): `rect | square` — `rect`
+  prefers the ECC200 rectangular formats (8x18 … 16x48), picked to best
+  match the target box aspect; content too long for any rectangle falls
+  back to a square symbol. Default square.
+- `data-tight` (2D symbologies, optional): `1` keeps the target box
+  snapped to the symbol's exact drawn extent after editor resizes
+  (editor behavior; renderers ignore it).
 - `data-logo` (qr only, optional): center logo overlay — `etiq` (the
   built-in Etiquette icon), an image file path (absolute, or relative to
   the label file — one shared file updates many templates), an http(s)
