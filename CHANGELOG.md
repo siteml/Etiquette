@@ -28,6 +28,11 @@ All notable changes to Etiquette are documented here. The format follows
 - Inspector: live encode-status rows for `itf14` (shows the appended
   check digit) and `gs1-128` (AI syntax validation), an ECC selector for
   `rmqr`, and a Rectangular toggle for DataMatrix.
+- **Update experience** — the update prompt now shows this changelog,
+  rendered, with *Install now*, *Skip this version*, and *Remind me
+  later*; a new Help → Options dialog controls the startup update check,
+  the download flavor, and skipped releases.
+- A `CHANGELOG.md` (this file).
 
 ### Changed
 - Editor performance overhaul: the inspector caches built control sets per

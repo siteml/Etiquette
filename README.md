@@ -26,12 +26,14 @@ apart:
   merge data into the template, generate barcodes, print via any Windows
   printer driver — plus a ZPL raster path for thermal printers.
 
-## What it does today (v0.5)
+## What it does today (v0.6)
 
-- **Barcodes, dependency-free:** Code 128, Code 39 (+extended), QR
-  (versions 1–40, all ECC levels), DataMatrix (ECC200), PDF417 — every
-  encoder decode-verified against two independent readers. QR supports a
-  center **logo overlay** with geometry tuned so codes stay scannable.
+- **Barcodes, dependency-free:** Code 128, GS1-128, Code 39 (+extended),
+  ITF-14, QR (versions 1–40, all ECC levels), rMQR, Aztec, DataMatrix
+  (ECC200, square and rectangular), PDF417 — every encoder
+  decode-verified against independent readers, with optional
+  human-readable text on the linear codes. QR supports a center
+  **logo overlay** with geometry tuned so codes stay scannable.
 - **Data-driven templates:** fields resolved from prompts, embedded pick
   lists, composition (with conditional variants — e.g. international
   address ordering), lookup maps, serial counters, dates, and REST

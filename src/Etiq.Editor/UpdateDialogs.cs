@@ -4,12 +4,12 @@ namespace Etiq.Editor;
 public enum UpdateChoice { Install, SkipVersion, Later }
 
 /// <summary>
-/// Update UI: the update-available window renders the repo's CHANGELOG.md
-/// (fetched from GitHub) with a small dependency-free markdown-lite
-/// renderer into a RichTextBox — headings, bullets, **bold**, `code` —
-/// with Install / Skip this version / Later. The Options dialog exposes
-/// the update behavior settings (startup check, flavor, skipped release)
-/// so any choice can be changed later.
+/// Update UI: the update-available window shows the repo's CHANGELOG.md
+/// (fetched from GitHub) converted to HTML and rendered in the built-in
+/// WinForms WebBrowser control with GitHub-style CSS — no NuGet, no
+/// external engine. Links open in the system browser. Buttons: Install /
+/// Skip this version / Remind me later. The Options dialog exposes the
+/// update behavior settings so any choice can be changed later.
 /// </summary>
 public static class UpdateDialogs
 {
@@ -20,7 +20,7 @@ public static class UpdateDialogs
         using var f = new Form
         {
             Text = $"Update available — {tag}",
-            ClientSize = new Size(580, 480), MinimumSize = new Size(440, 320),
+            ClientSize = new Size(620, 520), MinimumSize = new Size(460, 340),
             StartPosition = FormStartPosition.CenterParent,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
         };
@@ -29,19 +29,28 @@ public static class UpdateDialogs
             Text = $"Version {tag} is available — you have v{currentVer}. What's new:",
             Dock = DockStyle.Top, Height = 30, Padding = new Padding(10, 8, 10, 0),
         };
-        var rtb = new RichTextBox
+        var web = new WebBrowser
         {
-            Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None,
-            BackColor = SystemColors.Window, DetectUrls = true,
+            Dock = DockStyle.Fill,
+            AllowWebBrowserDrop = false,
+            IsWebBrowserContextMenuEnabled = false,
+            WebBrowserShortcutsEnabled = false,
+            ScriptErrorsSuppressed = true,
         };
-        rtb.LinkClicked += (_, e) =>
+        // any real navigation (a link click) opens the SYSTEM browser;
+        // only the initial DocumentText load (about:blank) renders inline
+        web.Navigating += (_, e) =>
         {
-            try
+            if (e.Url is { } u && u.Scheme is "http" or "https")
             {
-                System.Diagnostics.Process.Start(
-                    new System.Diagnostics.ProcessStartInfo(e.LinkText!) { UseShellExecute = true });
+                e.Cancel = true;
+                try
+                {
+                    System.Diagnostics.Process.Start(
+                        new System.Diagnostics.ProcessStartInfo(u.ToString()) { UseShellExecute = true });
+                }
+                catch { /* no browser: ignore */ }
             }
-            catch { /* no browser: ignore */ }
         };
         var buttons = new FlowLayoutPanel
         {
@@ -53,15 +62,13 @@ public static class UpdateDialogs
         var skip = new Button { Text = "Skip this version", AutoSize = true, DialogResult = DialogResult.Ignore };
         buttons.Controls.AddRange(new Control[] { install, later, skip });
         // Fill first, then the edges (dock runs in reverse add order)
-        f.Controls.Add(rtb);
+        f.Controls.Add(web);
         f.Controls.Add(head);
         f.Controls.Add(buttons);
         f.AcceptButton = install;
         f.CancelButton = later;
-        RenderMarkdown(rtb, changelogMd ??
+        web.DocumentText = MarkdownHtml.Render(changelogMd ??
             "*The changelog could not be loaded — the release page has the details.*");
-        rtb.SelectionStart = 0;
-        rtb.ScrollToCaret();
         return f.ShowDialog(owner) switch
         {
             DialogResult.OK => UpdateChoice.Install,
@@ -130,91 +137,136 @@ public static class UpdateDialogs
             { 1 => "standalone", 2 => "framework", _ => "auto" };
         }
     }
+}
 
-    // ---------- markdown-lite → RichTextBox ----------
-    // Line-based: #/##/### headings, "- " bullets, --- rules; inline
-    // **bold** and `code`. Links stay plain text (DetectUrls makes bare
-    // URLs clickable). Good enough for a changelog; never throws.
+/// <summary>
+/// Small dependency-free markdown → HTML converter for the changelog
+/// viewer: headings, unordered lists (one nesting level), fenced and
+/// inline code, bold, italic, links, horizontal rules, paragraphs.
+/// Everything is HTML-escaped first, so arbitrary changelog content can
+/// never inject markup. Not a general renderer — just enough to make a
+/// Keep-a-Changelog file look the way GitHub renders it.
+/// </summary>
+internal static class MarkdownHtml
+{
+    private const string Css = """
+        body { font-family: 'Segoe UI', sans-serif; font-size: 13px;
+               color: #1f2328; margin: 14px 18px; line-height: 1.55; }
+        h1 { font-size: 20px; border-bottom: 1px solid #d8dee4;
+             padding-bottom: 6px; margin: 10px 0 8px; }
+        h2 { font-size: 16px; border-bottom: 1px solid #eaeef1;
+             padding-bottom: 4px; margin: 18px 0 6px; }
+        h3 { font-size: 14px; margin: 12px 0 4px; }
+        ul { margin: 4px 0 8px; padding-left: 26px; }
+        li { margin: 2px 0; }
+        p  { margin: 6px 0; }
+        code { font-family: Consolas, monospace; font-size: 12px;
+               background: #f0f2f4; border-radius: 4px; padding: 1px 5px; }
+        pre { background: #f0f2f4; border-radius: 6px; padding: 8px 10px; }
+        pre code { background: none; padding: 0; }
+        a { color: #0a69da; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        hr { border: none; border-top: 1px solid #d8dee4; margin: 12px 0; }
+        em { color: #57606a; }
+        """;
 
-    private static void RenderMarkdown(RichTextBox rtb, string md)
+    public static string Render(string md)
     {
-        var body = rtb.Font;
-        var bold = new Font(body, FontStyle.Bold);
-        var italic = new Font(body, FontStyle.Italic);
-        var h1 = new Font(body.FontFamily, body.Size + 4, FontStyle.Bold);
-        var h2 = new Font(body.FontFamily, body.Size + 2, FontStyle.Bold);
-        var code = new Font(FontFamily.GenericMonospace, body.Size);
+        var sb = new System.Text.StringBuilder();
+        sb.Append("<!DOCTYPE html><html><head><meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"/>");
+        sb.Append("<meta charset=\"utf-8\"/><style>").Append(Css).Append("</style></head><body>");
 
-        void Append(string text, Font font)
+        var lines = md.Replace("\r\n", "\n").Split('\n');
+        int listDepth = 0;          // 0 = not in a list, 1-2 = <ul> depth
+        bool liOpen = false;        // current <li> stays open for continuations
+        bool inPre = false;
+        var para = new System.Text.StringBuilder();
+
+        void CloseLi()
         {
-            rtb.SelectionFont = font;
-            rtb.AppendText(text);
+            if (liOpen) { sb.Append("</li>"); liOpen = false; }
         }
-        void AppendInline(string line, Font baseFont)
+        void CloseLists(int to)
         {
-            int i = 0;
-            var cur = new System.Text.StringBuilder();
-            bool inBold = false, inCode = false;
-            void Flush()
-            {
-                if (cur.Length == 0) return;
-                Append(cur.ToString(), inCode ? code : inBold ? bold : baseFont);
-                cur.Clear();
-            }
-            while (i < line.Length)
-            {
-                if (!inCode && i + 1 < line.Length && line[i] == '*' && line[i + 1] == '*')
-                {
-                    Flush();
-                    inBold = !inBold;
-                    i += 2;
-                }
-                else if (line[i] == '`')
-                {
-                    Flush();
-                    inCode = !inCode;
-                    i++;
-                }
-                else
-                {
-                    cur.Append(line[i]);
-                    i++;
-                }
-            }
-            Flush();
+            CloseLi();
+            while (listDepth > to) { sb.Append("</ul>"); listDepth--; }
+        }
+        void FlushPara()
+        {
+            if (para.Length == 0) return;
+            sb.Append("<p>").Append(Inline(para.ToString())).Append("</p>");
+            para.Clear();
         }
 
-        foreach (var raw in md.Replace("\r\n", "\n").Split('\n'))
+        foreach (var raw in lines)
         {
             string line = raw.TrimEnd();
-            if (line.StartsWith("### "))
-            { Append(line[4..] + "\n", bold); }
-            else if (line.StartsWith("## "))
-            { Append("\n", body); Append(line[3..] + "\n", h2); }
-            else if (line.StartsWith("# "))
-            { Append(line[2..] + "\n", h1); }
-            else if (line.StartsWith("---"))
-            { Append(new string('—', 20) + "\n", body); }
-            else if (line.TrimStart().StartsWith("- "))
+            if (inPre)
             {
-                string indent = line[..(line.Length - line.TrimStart().Length)];
-                Append(indent + "  •  ", body);
-                AppendInline(line.TrimStart()[2..], body);
-                Append("\n", body);
+                if (line.TrimStart().StartsWith("```")) { sb.Append("</code></pre>"); inPre = false; }
+                else sb.Append(Escape(raw)).Append('\n');
+                continue;
             }
-            else if (line.TrimStart().StartsWith("* ") && line.TrimStart().Length > 2)
+            string t = line.TrimStart();
+            int indent = line.Length - t.Length;
+
+            if (t.StartsWith("```"))
+            { FlushPara(); CloseLists(0); sb.Append("<pre><code>"); inPre = true; }
+            else if (t.StartsWith("### "))
+            { FlushPara(); CloseLists(0); sb.Append("<h3>").Append(Inline(t[4..])).Append("</h3>"); }
+            else if (t.StartsWith("## "))
+            { FlushPara(); CloseLists(0); sb.Append("<h2>").Append(Inline(t[3..])).Append("</h2>"); }
+            else if (t.StartsWith("# "))
+            { FlushPara(); CloseLists(0); sb.Append("<h1>").Append(Inline(t[2..])).Append("</h1>"); }
+            else if (t.StartsWith("---") && t.TrimEnd('-').Length == 0)
+            { FlushPara(); CloseLists(0); sb.Append("<hr/>"); }
+            else if (t.StartsWith("- ") || t.StartsWith("* "))
             {
-                Append("  •  ", body);
-                AppendInline(line.TrimStart()[2..], body);
-                Append("\n", body);
+                FlushPara();
+                int depth = indent >= 2 ? 2 : 1;
+                CloseLi();
+                while (listDepth > depth) { sb.Append("</ul>"); listDepth--; }
+                while (listDepth < depth) { sb.Append("<ul>"); listDepth++; }
+                sb.Append("<li>").Append(Inline(t[2..]));
+                liOpen = true;
             }
-            else if (line.StartsWith("*") && line.EndsWith("*") && line.Length > 2)
-            { Append(line.Trim('*') + "\n", italic); }
+            else if (t.Length == 0)
+            { FlushPara(); CloseLists(0); }
+            else if (listDepth > 0 && indent >= 2)
+            {
+                // continuation line of the previous bullet
+                sb.Append(' ').Append(Inline(t));
+            }
             else
             {
-                AppendInline(line, body);
-                Append("\n", body);
+                CloseLists(0);
+                if (para.Length > 0) para.Append(' ');
+                para.Append(t);
             }
         }
+        if (inPre) sb.Append("</code></pre>");
+        FlushPara();
+        CloseLists(0);
+        sb.Append("</body></html>");
+        return sb.ToString();
+    }
+
+    private static string Escape(string s) =>
+        s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+
+    /// <summary>Inline spans over ESCAPED text: `code`, **bold**,
+    /// *italic*, and [text](url) links (http/https only).</summary>
+    private static string Inline(string s)
+    {
+        s = Escape(s);
+        s = System.Text.RegularExpressions.Regex.Replace(
+            s, @"`([^`]+)`", "<code>$1</code>");
+        s = System.Text.RegularExpressions.Regex.Replace(
+            s, @"\*\*([^*]+)\*\*", "<b>$1</b>");
+        s = System.Text.RegularExpressions.Regex.Replace(
+            s, @"(?<![\w*])\*([^*\s][^*]*)\*(?!\*)", "<em>$1</em>");
+        s = System.Text.RegularExpressions.Regex.Replace(
+            s, @"\[([^\]]+)\]\((https?://[^)\s]+)\)", "<a href=\"$2\">$1</a>");
+        return s;
     }
 }
