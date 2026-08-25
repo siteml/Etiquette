@@ -92,6 +92,9 @@ public sealed class EtiqTemplate
         /// <summary>Declared field resolved PER ROW for the picker text (can
         /// be a compose over several columns); absent = key + first column.</summary>
         public string? Display => (string?)El.Attribute("display");
+        /// <summary>panel="hide": no picker on the data panel (selection
+        /// stays whatever default= names).</summary>
+        public bool PanelHide => (string?)El.Attribute("panel") == "hide";
         /// <summary>Row filtering: offer only rows where row[filter-column]
         /// equals the resolved value of the filter-ref field (empty filter
         /// value = all rows). Both or neither.</summary>
@@ -107,6 +110,75 @@ public sealed class EtiqTemplate
 
         public Dictionary<string, string>? RowByKey(string keyValue) =>
             Rows.FirstOrDefault(r => r.GetValueOrDefault(Key) == keyValue);
+    }
+
+    /// <summary>A declared remote data source (convention 0.2+ "Sources"):
+    /// ONE fetch per label against a NAMED connection, yielding a row whose
+    /// columns fields reference via source="epicor" from= column=. Multiple
+    /// sources per template are fine and may share a connection. The
+    /// template never carries credentials or URLs — the connection name is
+    /// resolved by the machine's connection store, and WHICH dataset
+    /// (Epicor environment / database / tenant) is used is a machine or
+    /// session choice, unless dataset= pins it here explicitly.</summary>
+    public sealed record SourceDef(XElement El)
+    {
+        public string Name => (string?)El.Attribute("name") ?? "";
+        public string Connection => (string?)El.Attribute("connection") ?? "";
+        /// <summary>Rarely used: pin one dataset regardless of the machine
+        /// or session selection (e.g. a reference source that must always
+        /// read production).</summary>
+        public string? Dataset => (string?)El.Attribute("dataset");
+        /// <summary>BAQ id (epicor connections); analogous name for other
+        /// connection types (table/view, endpoint...).</summary>
+        public string? Baq => (string?)El.Attribute("baq");
+        public string? Query => (string?)El.Attribute("query");
+        /// <summary>param-Xxx="literal or {FieldName}" → BAQ parameter Xxx.</summary>
+        public Dictionary<string, string> Params => Prefixed("param-");
+        /// <summary>filter-Col="literal or {FieldName}" → OData $filter Col eq value.</summary>
+        public Dictionary<string, string> Filters => Prefixed("filter-");
+        private Dictionary<string, string> Prefixed(string prefix) =>
+            El.Attributes()
+              .Where(a => a.Name.LocalName.StartsWith(prefix, StringComparison.Ordinal))
+              .ToDictionary(a => a.Name.LocalName[prefix.Length..], a => a.Value);
+    }
+
+    /// <summary>Data-panel presentation config (etiq:panel): which action
+    /// buttons exist and where, how printing behaves, and whether copies /
+    /// collation live directly on the form. Absent = the defaults below,
+    /// which are exactly the historical behavior.</summary>
+    public sealed record PanelDef(XElement? El)
+    {
+        private string? A(string n) => El is null ? null : (string?)El.Attribute(n);
+        /// <summary>dialog (system print dialog) | direct (straight to the
+        /// printer — labelprint behavior; see Printer).</summary>
+        public string Print => A("print") ?? "dialog";
+        /// <summary>direct printing: absent = machine default printer;
+        /// a name = pinned; "embedded" = an on-form picker with a
+        /// "Default printer" checkmark (labelprint-style).</summary>
+        public string? Printer => A("printer");
+        /// <summary>ask (copies dialog on batch) | embedded (count control
+        /// on the form) | fixed:N.</summary>
+        public string Copies => A("copies") ?? "ask";
+        /// <summary>choose (selector on the form) | grouped (1-1-2-2) |
+        /// sequenced (1-2-1-2) | ask (no selector — popup only when a run
+        /// actually multiplies more than one page).</summary>
+        public string Collate => A("collate") ?? "choose";
+        /// <summary>Explicit input order for the data panel: comma list of
+        /// field:Name / list:Name tokens. Unlisted inputs follow in
+        /// declaration order.</summary>
+        public string[] Order =>
+            (A("order") ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        /// <summary>Which action buttons exist, in order:
+        /// preview, print, printall, clear.</summary>
+        public string[] Buttons =>
+            (A("buttons") ?? "preview,print,printall,clear")
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        /// <summary>bottom (after the fields) | top.</summary>
+        public string ButtonsAt => A("buttons-at") ?? "bottom";
+
+        public int? FixedCopies =>
+            Copies.StartsWith("fixed:") &&
+            int.TryParse(Copies["fixed:".Length..], out int n) && n > 0 ? n : null;
     }
 
     /// <summary>A layer group: direct child &lt;g&gt; of the root with data-layer (convention 0.2).</summary>
@@ -125,6 +197,17 @@ public sealed class EtiqTemplate
         public string? Value => (string?)El.Attribute("value");
         // 0.2 additions
         public string? Connection => (string?)El.Attribute("connection");
+        /// <summary>Declared etiq:source this field reads its column from
+        /// (source="epicor"); absent = the engine's single implicit source
+        /// (legacy labelprint-style config).</summary>
+        public string? From => (string?)El.Attribute("from");
+        /// <summary>source=epicor: the operator may TYPE OVER the fetched
+        /// value — a non-empty prompt entry wins, an empty one falls back
+        /// to the remote pull (shown as ghost text in the data panel).</summary>
+        public bool Override => (string?)El.Attribute("override") == "true";
+        /// <summary>panel="hide": resolve as usual but show no input on the
+        /// data panel (prompt/override/list fields).</summary>
+        public bool PanelHide => (string?)El.Attribute("panel") == "hide";
         public string? Query => (string?)El.Attribute("query");
         public string? Pick => (string?)El.Attribute("pick");
         public string? FilePath => (string?)El.Attribute("path");
@@ -165,6 +248,9 @@ public sealed class EtiqTemplate
     public List<BarcodeRect> Barcodes { get; } = new();
     public List<MapDef> Maps { get; } = new();
     public List<ListDef> Lists { get; } = new();           // embedded pick lists
+    public List<SourceDef> Sources { get; } = new();       // declared remote sources
+    /// <summary>Data-panel presentation (etiq:panel); El null = defaults.</summary>
+    public PanelDef Panel { get; }
     public List<Layer> Layers { get; } = new();            // root-child <g data-layer>
 
     private EtiqTemplate(string path, XDocument doc)
@@ -201,6 +287,11 @@ public sealed class EtiqTemplate
 
         foreach (var m in doc.Descendants(Ns + "map"))
             Maps.Add(new MapDef(m));
+
+        foreach (var src in doc.Descendants(Ns + "source"))
+            Sources.Add(new SourceDef(src));
+
+        Panel = new PanelDef(doc.Descendants(Ns + "panel").FirstOrDefault());
 
         foreach (var l in doc.Descendants(Ns + "list"))
         {

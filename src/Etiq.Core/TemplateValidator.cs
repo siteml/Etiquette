@@ -42,6 +42,44 @@ public static class TemplateValidator
         if (t.ViewBox is null)
             Err("root-viewbox", "svg root must declare a viewBox");
 
+        // --- declared remote sources ---
+        var sourcesByName = new Dictionary<string, EtiqTemplate.SourceDef>(StringComparer.Ordinal);
+        foreach (var src in t.Sources)
+        {
+            if (src.Name == "")
+                { Err("source-name", "etiq:source with empty/missing name"); continue; }
+            if (!sourcesByName.TryAdd(src.Name, src))
+                Err("source-dup", $"source '{src.Name}' declared more than once");
+            if (src.Connection == "")
+                Err("source-conn", $"source '{src.Name}': connection= is required (a NAMED machine connection — never credentials or URLs in the template)");
+            if (string.IsNullOrWhiteSpace(src.Baq) && string.IsNullOrWhiteSpace(src.Query))
+                Err("source-baq", $"source '{src.Name}': baq= (or query=) is required");
+            if (src.Params.Count == 0 && src.Filters.Count == 0)
+                Warn("source-open", $"source '{src.Name}': no param-/filter- attributes — every fetch pulls the WHOLE result set");
+        }
+
+        // --- data-panel presentation ---
+        {
+            var p = t.Panel;
+            if (p.El is not null)
+            {
+                if (p.Print is not ("dialog" or "direct"))
+                    Err("panel-print", $"etiq:panel print='{p.Print}' — must be dialog|direct");
+                if (p.Copies is not ("ask" or "embedded") && p.FixedCopies is null)
+                    Err("panel-copies", $"etiq:panel copies='{p.Copies}' — must be ask|embedded|fixed:N");
+                if (p.Collate is not ("choose" or "grouped" or "sequenced" or "ask"))
+                    Err("panel-collate", $"etiq:panel collate='{p.Collate}' — must be choose|grouped|sequenced|ask");
+                if (p.ButtonsAt is not ("bottom" or "top"))
+                    Err("panel-buttons", $"etiq:panel buttons-at='{p.ButtonsAt}' — must be bottom|top");
+                foreach (var b in p.Buttons)
+                    if (b is not ("preview" or "print" or "printall" or "clear"))
+                        Err("panel-buttons", $"etiq:panel buttons: unknown '{b}' (preview|print|printall|clear)");
+                if (p.Printer is not null && p.Print != "direct")
+                    Warn("panel-printer", "etiq:panel printer= only applies with print='direct'");
+                // printer="embedded" is the on-form picker; any other value is a printer NAME
+            }
+        }
+
         // --- lookup maps ---
         var mapsByName = new Dictionary<string, EtiqTemplate.MapDef>();
         foreach (var m in t.Maps)
@@ -104,8 +142,17 @@ public static class TemplateValidator
 
             switch (f.Source)
             {
-                case "epicor" when string.IsNullOrWhiteSpace(f.Column):
-                    Err("field-epicor", $"field '{f.Name}': source=epicor requires column="); break;
+                case "epicor":
+                    if (string.IsNullOrWhiteSpace(f.Column))
+                        Err("field-epicor", $"field '{f.Name}': source=epicor requires column=");
+                    if (f.From is not null && !sourcesByName.ContainsKey(f.From))
+                        Err("field-from", $"field '{f.Name}': from='{f.From}' names no declared etiq:source");
+                    break;
+            }
+            if (f.Override && f.Source != "epicor")
+                Warn("field-override", $"field '{f.Name}': override= has no effect on source={f.Source}");
+            switch (f.Source)
+            {
                 case "serial" when string.IsNullOrWhiteSpace(f.Counter):
                     Err("serial-counter", $"field '{f.Name}': source=serial requires counter="); break;
                 case "fixed" when f.Value is null:
@@ -208,6 +255,21 @@ public static class TemplateValidator
             {
                 Err("variant-switch", $"field '{f.Name}': switch-on= without etiq:variant blocks has no effect");
             }
+        }
+
+        // --- source param/filter field references (needs full field table) ---
+        foreach (var src in t.Sources)
+        {
+            foreach (var (kind, dict) in new[] { ("param", src.Params), ("filter", src.Filters) })
+                foreach (var (key, val) in dict)
+                {
+                    if (!val.StartsWith('{') || !val.EndsWith('}')) continue;   // literal
+                    string rf = val[1..^1];
+                    if (!byName.TryGetValue(rf, out var pf))
+                        { Err("source-ref", $"source '{src.Name}': {kind}-{key} references undeclared field '{rf}'"); continue; }
+                    if (pf.Source == "epicor" && pf.From == src.Name)
+                        Err("source-cycle", $"source '{src.Name}': {kind}-{key} references field '{rf}' which reads FROM this source (circular)");
+                }
         }
 
         // --- compose segments (second pass: needs full field table) ---
@@ -372,17 +434,8 @@ public static class TemplateValidator
             {
                 if (becc is not ("L" or "M" or "Q" or "H"))
                     Err("barcode-ecc", $"barcode '{sym}': data-ecc must be L|M|Q|H, got '{becc}'");
-                if (sym == "rmqr" && becc is not ("M" or "H"))
-                    Err("barcode-ecc", $"barcode '{sym}': rmqr supports only data-ecc M|H, got '{becc}'");
-                if (sym is not ("qr" or "rmqr"))
-                    Warn("barcode-ecc", $"barcode '{sym}': data-ecc only applies to qr and rmqr");
-            }
-            if ((string?)b.El.Attribute("data-dmshape") is { } dsh)
-            {
-                if (dsh is not ("rect" or "square"))
-                    Err("barcode-dmshape", $"barcode '{sym}': data-dmshape must be rect|square, got '{dsh}'");
-                if (sym != "datamatrix")
-                    Warn("barcode-dmshape", $"barcode '{sym}': data-dmshape only applies to datamatrix");
+                if (sym != "qr")
+                    Warn("barcode-ecc", $"barcode '{sym}': data-ecc only applies to qr");
             }
             if ((string?)b.El.Attribute("data-columns") is { } bcols)
             {

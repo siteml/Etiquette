@@ -24,6 +24,7 @@ public static class UpdateDialogs
             StartPosition = FormStartPosition.CenterParent,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
         };
+        Ui.AutoScale(f);
         var head = new Label
         {
             Text = $"Version {tag} is available — you have v{currentVer}. What's new:",
@@ -83,11 +84,12 @@ public static class UpdateDialogs
     {
         using var f = new Form
         {
-            Text = "Options", ClientSize = new Size(430, 200),
+            Text = "Options", ClientSize = new Size(430, 240),
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
         };
+        Ui.AutoScale(f);
         var auto = new CheckBox
         {
             Text = "Check for updates when the editor starts",
@@ -125,9 +127,16 @@ public static class UpdateDialogs
             skipLbl.Text = "No release is being skipped.";
             clear.Enabled = false;
         };
-        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 246, Top = 160, Width = 80 };
-        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 334, Top = 160, Width = 80 };
-        f.Controls.AddRange(new Control[] { auto, flavorLbl, flavor, skipLbl, clear, ok, cancel });
+        var recentLbl = new Label { Text = "Recent files kept:", Left = 14, Top = 126, Width = 130 };
+        var recentNum = new NumericUpDown
+        {
+            Left = 150, Top = 122, Width = 70, Minimum = 1, Maximum = 30,
+            Value = MainForm.RecentMax,
+        };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 246, Top = 200, Width = 80 };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 334, Top = 200, Width = 80 };
+        f.Controls.AddRange(new Control[]
+            { auto, flavorLbl, flavor, skipLbl, clear, recentLbl, recentNum, ok, cancel });
         f.AcceptButton = ok;
         f.CancelButton = cancel;
         if (f.ShowDialog(owner) == DialogResult.OK)
@@ -135,6 +144,7 @@ public static class UpdateDialogs
             UpdateChecker.AutoCheck = auto.Checked;
             UpdateChecker.UpdateFlavor = flavor.SelectedIndex switch
             { 1 => "standalone", 2 => "framework", _ => "auto" };
+            UpdateChecker.SetSetting("recentMax", ((int)recentNum.Value).ToString());
         }
     }
 }

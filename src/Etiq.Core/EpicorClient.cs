@@ -78,6 +78,49 @@ public sealed class EpicorClient : IDisposable
         return row;
     }
 
+    /// <summary>Generic BAQ fetch for declared etiq:source elements: any
+    /// BAQ id, named parameters, and/or OData $filter equality terms.
+    /// Returns the FIRST row (one row per label; a source that needs the
+    /// whole set belongs in a pick list instead). Guard: at least one
+    /// param/filter must carry a non-empty value — an unconstrained call
+    /// would pull the entire BAQ.</summary>
+    public async Task<Dictionary<string, JsonElement>> FetchSourceRowAsync(
+        string baq,
+        IReadOnlyDictionary<string, string> parameters,
+        IReadOnlyDictionary<string, string> filters,
+        CancellationToken ct = default)
+    {
+        if (parameters.Values.All(string.IsNullOrWhiteSpace) &&
+            filters.Values.All(string.IsNullOrWhiteSpace))
+            throw new EpicorException($"BAQ '{baq}': every param/filter value is empty; refusing to query the whole BAQ");
+
+        var terms = new List<string>();
+        foreach (var (k, v) in parameters)
+            terms.Add($"{Uri.EscapeDataString(k)}={Uri.EscapeDataString(v)}");
+        var fparts = filters.Where(f => !string.IsNullOrWhiteSpace(f.Value))
+            .Select(f => $"{f.Key} eq '{f.Value.Replace("'", "''")}'").ToList();
+        if (fparts.Count > 0)
+            terms.Add("$filter=" + Uri.EscapeDataString(string.Join(" and ", fparts)));
+
+        string url = $"{Base}/api/v2/odata/{Uri.EscapeDataString(_cfg.Company)}/BaqSvc/{Uri.EscapeDataString(baq)}/Data"
+                     + "?" + string.Join("&", terms);
+        using var resp = await _http.GetAsync(url, ct);
+        string body = await ReadCappedAsync(resp, ct);
+        if ((int)resp.StatusCode != 200)
+            // the url carries no secrets (auth is in headers) — include it
+            // so a 400 shows exactly what the server rejected
+            throw new EpicorException(
+                $"BAQ '{baq}' returned HTTP {(int)resp.StatusCode} for {url}: {Trim(body, 300)}");
+        using var doc = JsonDocument.Parse(body);
+        if (!doc.RootElement.TryGetProperty("value", out var value) ||
+            value.ValueKind != JsonValueKind.Array || value.GetArrayLength() == 0)
+            throw new EpicorException($"BAQ '{baq}': no rows for the given parameters");
+        var row = new Dictionary<string, JsonElement>();
+        foreach (var p in value[0].EnumerateObject())
+            row[p.Name] = p.Value.Clone();
+        return row;
+    }
+
     private string BuildFilter(string job)
     {
         if (!_cfg.FieldMap.TryGetValue("JobNum", out var col) || col == "")

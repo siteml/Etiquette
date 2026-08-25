@@ -4,6 +4,87 @@ All notable changes to Etiquette are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver
 (pre-1.0: minor bumps may change behavior).
 
+## [Unreleased]
+
+## [0.7.0] — 2026-08-25
+
+### Added
+- **Named connections with datasets** — templates can now declare remote
+  data sources (`etiq:source`, e.g. an Epicor BAQ with parameters/filters
+  fed by prompt fields) that reference a machine-side connection by NAME
+  only; credentials never enter the template. Each connection can define
+  multiple datasets (Epicor environments, database names, …) and which one
+  is live is a machine or session choice — a toolbar picker (amber when
+  overriding) switches everything for testing without touching templates.
+  Secrets are DPAPI-protected per machine; File > Connections… manages the
+  store, and a password-protected `.etiqcreds` bundle (Export/Import or
+  `etiqedit --import-connections file`) provisions new machines — a
+  bundle found next to the exe is offered for import (and cleanup) on
+  startup, and a Test button verifies a connection's reachability and
+  authentication in plain language.
+- **Configurable data panel** (`etiq:panel`, edited on F4's new Panel
+  tab): choose which action buttons exist (Refresh Preview / Print /
+  Print All / Clear) and whether they sit above or below the fields; put
+  the copy count, collation, and a printer picker (with a "Default
+  printer" checkmark) directly on the form; hide individual inputs
+  (`panel="hide"` — the field still resolves) and reorder them with
+  Move Up/Down; and set `print="direct"` for labelprint-style printing
+  that goes straight to the chosen printer with no system dialog. The
+  collation selector enables only when a run can actually interleave
+  (a multi-label batch at 2+ copies), and `collate="ask"` hides it
+  entirely, asking in a popup only when it matters.
+- **Overrideable pulled fields** — `override="true"` on an epicor field
+  shows an input whose ghost text is the fetched value: leave it empty to
+  use the pull, type to override. F4 gained a **Sources** tab for
+  declaring BAQ fetches (connection, parameters/filters fed by fields)
+  without touching XML.
+- Data mode now mirrors the classic labelprint layout: data entry lives in
+  the LEFT pane (where the outline sits in Design mode) and the inspector
+  side collapses, giving the label preview the full remaining width.
+- A Clear button in the data pane blanks every prompt and picker after a
+  print job, ready for the next one.
+- File > Close (Ctrl+W) and File > Open Recent — the most recently used
+  files are remembered (how many is configurable in Help > Options;
+  default 10). Menu actions that can't run right now (Undo with nothing
+  to undo, Group without a multi-selection, Save with no document, …)
+  are grayed out.
+- Closing the window, opening a file, or File > New with unsaved changes
+  now asks to save first (Yes / No / Cancel) instead of silently
+  discarding work.
+- Changing the update-download preference (standalone ↔
+  framework-dependent) in Help > Options now takes effect even with no
+  new release: the version check offers switching to the alternate
+  package of the SAME version, verifying first that the .NET 8 Desktop
+  Runtime is present when switching to the framework-dependent build.
+- Print-station mode never runs the startup update check — stations
+  value stability; update by exiting station mode, updating manually,
+  and re-entering.
+- **Print-station mode** — a stripped-down presentation for dedicated
+  print stations: no menu, toolbar, outline or inspector, just the label
+  preview (auto-fitting the window) and the data-entry/print panel.
+  View → Enter Print-Station Mode persists it, so etiqedit opens straight
+  into the station view on every start until it is explicitly turned off
+  (Ctrl+Shift+F12, then typing UNLOCK — no accidental exit).
+  `etiqedit --station <file>` runs it for a single session.
+
+### Fixed
+- A print station whose template file went missing no longer falls open
+  into the full editor: it stays locked, explains which file is missing,
+  and still exits only via Ctrl+Shift+F12 + UNLOCK.
+- Opening a file while in Data mode no longer leaves the data pane blank
+  (a hidden inspector window could end up covering it).
+- The dropdown text in a freshly built inspector pane is no longer left
+  selected/highlighted on first visit.
+- The inline text editor now grows and shrinks with its content while
+  typing.
+- The editor now scales its layout correctly on machines with 125/150%
+  display scaling or an enlarged system font — controls, dialogs,
+  splitters and the inspector column grow with the text instead of
+  clipping it.
+- In Data mode, clicking the outline tree no longer re-activates the
+  design selection machinery (the tree is disabled while data mode locks
+  layout interaction).
+
 ## [0.6.0] — 2026-08-24
 
 ### Added

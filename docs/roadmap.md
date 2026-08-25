@@ -1,9 +1,23 @@
 # Roadmap
 
-Where Etiquette is and where it's going. Current release: **v0.6.0**
+Where Etiquette is and where it's going. Current release: **v0.7.0**
 (see the Releases page; `etiqedit` checks it via Help → Check for Updates).
 
 Legend: `[x]` done · `[~]` partially done · `[ ]` not started.
+
+## Shipped — v0.7.0
+
+- [x] **Named connections + datasets** — machine-side credential store
+      (DPAPI), declared `etiq:source` BAQ fetches referenced by name,
+      dataset (environment) switching per machine/session, `.etiqcreds`
+      provisioning bundles, F4 Sources tab, overrideable pulled fields.
+- [x] **Print-station mode** — persisted locked shop-floor presentation
+      (left-pane data entry, auto-fitting preview, deliberate unlock),
+      with a per-template configurable data panel (`etiq:panel`: inputs,
+      buttons, order, embedded copies/collation/printer, direct print).
+- [x] **Editor safety & ergonomics** — unsaved-changes guard, File >
+      Close / Open Recent, menu gray-out, Clear button, DPI/system-font
+      scaling, inline-editor autosize, assorted Data-mode fixes.
 
 ## Shipped — v0.6.0
 

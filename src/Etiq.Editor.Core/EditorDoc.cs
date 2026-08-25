@@ -18,7 +18,13 @@ public sealed class EditorDoc
     public UndoStack Undo { get; } = new();
     public double GridMils { get; set; } = 0;   // 0 = snapping off
 
-    private EditorDoc(XDocument xml, string? path) { Xml = xml; Path = path; }
+    private string _savedXml;   // serialized form at load/save time
+
+    private EditorDoc(XDocument xml, string? path)
+    {
+        Xml = xml; Path = path;
+        _savedXml = xml.ToString(SaveOptions.DisableFormatting);
+    }
 
     public static EditorDoc Load(string path) => new(XDocument.Load(path), path);
     public static EditorDoc Parse(string xml) => new(XDocument.Parse(xml), null);
@@ -27,7 +33,20 @@ public sealed class EditorDoc
     {
         Path = path ?? Path ?? throw new InvalidOperationException("no path");
         Xml.Save(Path);
+        _savedXml = Xml.ToString(SaveOptions.DisableFormatting);
     }
+
+    /// <summary>Unsaved changes exist. Judged by CONTENT, not undo count:
+    /// undoing every edit back to the loaded state reads clean, and merged
+    /// drag gestures can't hide behind an unchanged stack depth. Labels are
+    /// small, so the serialize-and-compare cost is negligible at the few
+    /// points this is asked (close / open / new).</summary>
+    public bool IsDirty => Xml.ToString(SaveOptions.DisableFormatting) != _savedXml;
+
+    /// <summary>Force dirty regardless of content — e.g. a freshly created
+    /// (File > New) document: picking the canvas size already IS work worth
+    /// a save prompt, even before the first edit.</summary>
+    public void MarkDirty() => _savedXml = "";
 
     public XElement Root => Xml.Root!;
 

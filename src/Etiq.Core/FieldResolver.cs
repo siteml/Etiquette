@@ -28,8 +28,15 @@ public sealed class ResolveContext
     /// <summary>Counter service for serial fields (Counters.cs).</summary>
     public ICounterProvider? Counters { get; init; }
 
-    /// <summary>Remote lookup for epicor fields: column name → value.</summary>
+    /// <summary>Remote lookup for epicor fields: column name → value.
+    /// Legacy single-source path (engine config names the one BAQ).</summary>
     public Func<string, string?>? EpicorColumn { get; init; }
+
+    /// <summary>Remote lookup for fields bound to a DECLARED etiq:source:
+    /// (source name, column name) → value. The provider owns fetching and
+    /// caching the source's row (one fetch per source per label) and
+    /// resolving its param-/filter- field references.</summary>
+    public Func<string, string, string?>? SourceColumn { get; init; }
 
     /// <summary>Remote lookup for rest fields: (connection, query, pick) → value.</summary>
     public Func<string, string?, string, string?>? Rest { get; init; }
@@ -107,6 +114,14 @@ public sealed class FieldResolver
             "prompt" => _ctx.PromptValues.GetValueOrDefault(name, ""),
             "auto" => ResolveAuto(f),
             "serial" => ResolveSerial(f),
+            // override="true": the operator's typed value beats the pull;
+            // empty entry = fetch as usual
+            "epicor" when f.Override &&
+                          _ctx.PromptValues.GetValueOrDefault(f.Name, "") is { Length: > 0 } typed
+                => typed,
+            "epicor" when f.From is not null => ResolveRemote(f, () =>
+                _ctx.SourceColumn?.Invoke(f.From, f.Column ?? "")
+                    ?? throw new InvalidOperationException($"no provider for source '{f.From}'")),
             "epicor" => ResolveRemote(f, () =>
                 _ctx.EpicorColumn?.Invoke(f.Column ?? "")
                     ?? throw new InvalidOperationException("no Epicor provider/row")),

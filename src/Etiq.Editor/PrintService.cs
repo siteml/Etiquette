@@ -24,6 +24,15 @@ public static class PrintService
     public static void PrintBatch(IWin32Window owner, EditorDoc doc,
                                   IReadOnlyList<IReadOnlyDictionary<string, string>?> pages,
                                   ITextMeasurer measurer)
+        => PrintBatch(owner, doc, pages, measurer, direct: false, printer: null);
+
+    /// <summary>direct=true skips the system print dialog entirely
+    /// (labelprint behavior — etiq:panel print="direct"): the job goes to
+    /// `printer` when named, else the machine default. Copies/collation
+    /// are expanded into PAGES by the caller, never left to the driver.</summary>
+    public static void PrintBatch(IWin32Window owner, EditorDoc doc,
+                                  IReadOnlyList<IReadOnlyDictionary<string, string>?> pages,
+                                  ITextMeasurer measurer, bool direct, string? printer)
     {
         if (pages.Count == 0) return;
         var vb = doc.ViewBox;
@@ -55,11 +64,28 @@ public static class PrintService
             e.HasMorePages = page < pages.Count;
         };
 
-        using var dlg = new PrintDialog
+        if (direct)
         {
-            Document = pd, UseEXDialog = true, AllowSomePages = false,
-        };
-        if (dlg.ShowDialog(owner) != DialogResult.OK) return;
+            if (!string.IsNullOrWhiteSpace(printer))
+                pd.PrinterSettings.PrinterName = printer;
+            if (!pd.PrinterSettings.IsValid)
+            {
+                MessageBox.Show(owner,
+                    printer is null
+                        ? "No valid default printer is configured on this machine."
+                        : $"Printer '{printer}' was not found on this machine.",
+                    "Print");
+                return;
+            }
+        }
+        else
+        {
+            using var dlg = new PrintDialog
+            {
+                Document = pd, UseEXDialog = true, AllowSomePages = false,
+            };
+            if (dlg.ShowDialog(owner) != DialogResult.OK) return;
+        }
         try
         {
             page = 0;

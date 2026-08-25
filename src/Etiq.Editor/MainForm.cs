@@ -21,17 +21,58 @@ public sealed class MainForm : Form
     private readonly ToolStripButton _modeButton = new("Mode: DESIGN") { CheckOnClick = true };
 
     private EditorDoc? _doc;
+    // print-station lock (--station <file>): the editor opens straight in
+    // Data mode with the design surface locked until explicitly unlocked
+    private bool _stationLocked;
+    private ToolStripMenuItem? _viewDesignItem, _viewDataItem;
+    private MenuStrip? _menuStrip;
+    private ToolStrip? _toolStrip;
     private readonly Dictionary<string, TextBox> _promptBoxes = new();
     private readonly Dictionary<string, ComboBox> _listCombos = new();
     // list row picker: display string ("key — Name") → key value, per list
     private readonly Dictionary<string, Dictionary<string, string>> _listDisplayToKey = new();
     private readonly Dictionary<string, string?> _listFilterVal = new(); // last applied filter
     private Label? _dataStatus;                       // inline resolve status
+    private NumericUpDown? _panelCopies;              // etiq:panel copies="embedded"
+    private ComboBox? _panelCollate;
+    private CheckBox? _panelPrinterDefault;           // etiq:panel printer="embedded"
+    private ComboBox? _panelPrinterBox;
     private System.Windows.Forms.Timer? _previewTimer; // debounced auto-preview
 
-    public MainForm(string? openPath)
+    // ---------- remote sources (etiq:source) ----------
+    // machine connection store + session dataset override + one-row-per-
+    // source cache (keyed by source name + resolved param signature so a
+    // changed prompt re-fetches but keystroke-debounced previews don't
+    // hammer the service)
+    private ToolStripComboBox? _datasetCombo;
+    private string? _sessionDataset;                  // null = machine default
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<
+        string, Dictionary<string, System.Text.Json.JsonElement>> _sourceRows = new();
+    // failed fetches, by the same signature: WITHOUT this every debounce
+    // tick retried a failing call synchronously on the UI thread (up to the
+    // HTTP timeout each time) — the app appeared frozen. A failure is only
+    // retried when the inputs change (new signature) or the user forces it
+    // (Refresh Preview / Clear / dataset change).
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _sourceFails = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte>
+        _fetchingSources = new();   // cross-source cycle guard
+
+    internal static string ConnectionsPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "Etiquette", "connections.json");
+
+    /// <summary>Dataset used when nothing pins one: session picker wins,
+    /// then the machine default (settings.json "dataset"), then each
+    /// connection's own default (null).</summary>
+    private string? ActiveDataset =>
+        _sessionDataset ?? UpdateChecker.GetSetting("dataset");
+
+    public MainForm(string? openPath) : this(openPath, station: false) { }
+
+    public MainForm(string? openPath, bool station)
     {
         Text = "Etiquette Designer";
+        Ui.AutoScale(this);
         Width = 1280; Height = 800;
         StartPosition = FormStartPosition.CenterScreen;
         KeyPreview = true;
@@ -47,15 +88,50 @@ public sealed class MainForm : Form
         BuildLayout();
         BuildMenu();
 
-        if (openPath is not null && File.Exists(openPath)) OpenFile(openPath);
+        // this machine's persisted station role wins over any argument;
+        // --station <file> is the transient (this-run-only) variant
+        string? stationFile = UpdateChecker.GetSetting(StationFileKey);
+        if (stationFile is not null)
+        {
+            if (File.Exists(stationFile)) OpenFile(stationFile);
+            // LOCK REGARDLESS of whether the template loaded: a machine
+            // designated as a print station must never silently fall open
+            // into the full editor because the file went missing — the
+            // station view shows what's wrong instead, and the only way
+            // out stays Ctrl+Shift+F12 + UNLOCK.
+            if (_doc is null)
+                Shown += (_, _) => MessageBox.Show(this,
+                    "This machine is set up as a print station, but its template " +
+                    $"could not be loaded:\n\n    {stationFile}\n\n" +
+                    "Restore the file and restart — or press Ctrl+Shift+F12 and type " +
+                    "UNLOCK to leave print-station mode.",
+                    "Print Station", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Shown += (_, _) => StationLock();
+        }
+        else
+        {
+            if (openPath is not null && File.Exists(openPath)) OpenFile(openPath);
+            if (station && _doc is not null) Shown += (_, _) => StationLock();
+        }
 
         // silent startup update check, only when the build ships a repo
         // and the user hasn't turned it off (Help → Options)
         Shown += async (_, _) =>
         {
+            // NEVER on a print station: an operator can't judge an update
+            // prompt, and a station values stability over currency. (The
+            // station Shown handler runs first, so the lock is already
+            // set.) Updating a station = exit station mode, update
+            // manually, re-enter. A pinning mechanism (update server /
+            // version file) for production fleets is a planned follow-up.
+            if (_stationLocked) return;
             if (UpdateChecker.Configured && UpdateChecker.AutoCheck)
                 await CheckForUpdates(interactive: false);
         };
+
+        // never lose work silently: closing with unsaved changes prompts
+        // (station mode can't edit, so it never triggers this)
+        FormClosing += (_, e) => { if (!ConfirmDiscard()) e.Cancel = true; };
     }
 
     /// <summary>Pick + offer the right download for an available update.
@@ -99,9 +175,55 @@ public sealed class MainForm : Form
         }
         else wantStandalone = UpdateChecker.IsSelfContained;
 
-        string? assetUrl = wantStandalone ? rel.StandaloneUrl : rel.FrameworkUrl;
-        string? assetName = wantStandalone ? rel.StandaloneName : rel.FrameworkName;
+        await InstallAssetAsync(rel,
+            wantStandalone ? rel.StandaloneUrl : rel.FrameworkUrl,
+            wantStandalone ? rel.StandaloneName : rel.FrameworkName);
+    }
 
+    /// <summary>Same-version PACKAGE TYPE swap (standalone ↔ framework-
+    /// dependent), driven by the Options preference. Framework-dependent
+    /// needs the .NET 8 Desktop Runtime — checked BEFORE offering, since a
+    /// swapped install that can't start is a bricked station.</summary>
+    private async Task OfferFlavorSwitch(UpdateChecker.Release rel, bool toStandalone)
+    {
+        if (!toStandalone && !UpdateChecker.DesktopRuntimeInstalled())
+        {
+            MessageBox.Show(this,
+                "Your update preference is the framework-dependent package, but the " +
+                ".NET 8 Desktop Runtime was not found on this machine.\n\n" +
+                "Install the runtime first (aka.ms/dotnet — \"Desktop Runtime\"), " +
+                "or set Help > Options > Update download back to standalone/auto.",
+                "Switch package type");
+            return;
+        }
+        string? assetUrl = toStandalone ? rel.StandaloneUrl : rel.FrameworkUrl;
+        string? assetName = toStandalone ? rel.StandaloneName : rel.FrameworkName;
+        if (assetUrl is null)
+        {
+            MessageBox.Show(this,
+                $"Release {rel.Tag} has no {(toStandalone ? "standalone" : "framework-dependent")} asset to switch to.",
+                "Switch package type");
+            return;
+        }
+        string cur = UpdateChecker.IsSelfContained ? "standalone" : "framework-dependent";
+        string tgt = toStandalone ? "standalone" : "framework-dependent";
+        if (MessageBox.Show(this,
+                $"You're running the {cur} package of v{UpdateChecker.Current.ToString(3)}, " +
+                $"but your update preference is {tgt}.\n\n" +
+                $"Switch to the {tgt} package now (same version)?\n\n" +
+                "(Choosing No leaves everything as is — set Help > Options > Update " +
+                "download to \"auto\" if you don't want this offer.)",
+                "Switch package type", MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+        await InstallAssetAsync(rel, assetUrl, assetName);
+    }
+
+    /// <summary>Shared install tail: in-place when possible, browser
+    /// download otherwise.</summary>
+    private async Task InstallAssetAsync(UpdateChecker.Release rel,
+                                         string? assetUrl, string? assetName)
+    {
         // in-place install needs a direct asset AND a writable install
         // folder; otherwise it's a browser download like before
         // "Install now" was already confirmed on the changelog dialog
@@ -145,6 +267,7 @@ public sealed class MainForm : Form
             StartPosition = FormStartPosition.CenterParent,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
         };
+        Ui.AutoScale(f);
         var lbl = new Label
         {
             Text = "This machine has the .NET 8 Desktop Runtime installed, so the " +
@@ -199,11 +322,24 @@ public sealed class MainForm : Form
                     return;
                 await OfferUpdate(rel);
             }
-            else if (interactive)
+            else
             {
-                MessageBox.Show(this,
-                    $"You're up to date — v{UpdateChecker.Current.ToString(3)} (latest release: {rel.Tag}).",
-                    "Check for Updates");
+                // same version, but the PREFERRED package type differs from
+                // the running one (Help > Options changed after install):
+                // offer swapping to the alternate package of this release
+                bool runningStandalone = UpdateChecker.IsSelfContained;
+                string pref = UpdateChecker.UpdateFlavor;
+                bool wantStandalone = pref == "standalone" ||
+                                      (pref != "framework" && runningStandalone);
+                if (rel.Version == UpdateChecker.Current && wantStandalone != runningStandalone)
+                {
+                    await OfferFlavorSwitch(rel, wantStandalone);
+                    return;
+                }
+                if (interactive)
+                    MessageBox.Show(this,
+                        $"You're up to date — v{UpdateChecker.Current.ToString(3)} (latest release: {rel.Tag}).",
+                        "Check for Updates");
             }
         }
         catch (Exception ex)
@@ -222,7 +358,6 @@ public sealed class MainForm : Form
     {
         var right = new Panel { Dock = DockStyle.Fill };
         right.Controls.Add(_props);
-        right.Controls.Add(_dataPanel);
 
         // NOTE: never set Panel1MinSize/Panel2MinSize/SplitterDistance in
         // the initializer — a SplitContainer's default size is ~200px and a
@@ -241,7 +376,11 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill, Orientation = Orientation.Vertical,
             FixedPanel = FixedPanel.Panel1,
         };
+        // the LEFT pane is shared: outline in Design mode, data entry in
+        // Data mode (labelprint's layout — operators work on the left,
+        // label preview fills the rest)
         _split1.Panel1.Controls.Add(_outline);
+        _split1.Panel1.Controls.Add(_dataPanel);
         _split1.Panel2.Controls.Add(_split2);
 
         Controls.Add(_split1);
@@ -250,18 +389,38 @@ public sealed class MainForm : Form
         {
             try
             {
-                _split1.Panel1MinSize = 180;
-                _split1.SplitterDistance = 260;                     // outline tree
-                _split2.Panel2MinSize = 260;
-                _split2.SplitterDistance = Math.Max(300, _split2.Width - 340); // property panel
+                float uiF = Ui.Factor(this);   // splitter panes hold text: scale with it
+                _split1.Panel1MinSize = (int)(180 * uiF);
+                _split1.SplitterDistance = (int)(260 * uiF);        // outline tree
+                _split2.Panel2MinSize = (int)(260 * uiF);
+                _split2.SplitterDistance = Math.Max((int)(300 * uiF), _split2.Width - (int)(340 * uiF)); // property panel
             }
             catch (ArgumentOutOfRangeException) { /* tiny window: keep defaults */ }
             _canvas.FitToWindow();
         };
 
-        var tools = new ToolStrip();
+        var tools = _toolStrip = new ToolStrip();
         _modeButton.CheckedChanged += (_, _) => SetMode(_modeButton.Checked ? EditorMode.Data : EditorMode.Design);
         tools.Items.Add(_modeButton);
+        // session dataset picker: which dataset (Epicor environment /
+        // database / ...) declared sources read from, FOR THIS SESSION.
+        // Loud when overriding: amber background. Station mode hides the
+        // toolbar entirely, so a station stays pinned to the machine default.
+        _datasetCombo = new ToolStripComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+        _datasetCombo.DropDown += (_, _) => PopulateDatasetCombo();
+        _datasetCombo.SelectedIndexChanged += (_, _) =>
+        {
+            string? pick = _datasetCombo.SelectedIndex <= 0
+                ? null : _datasetCombo.SelectedItem?.ToString();
+            if (pick == _sessionDataset) return;
+            _sessionDataset = pick;
+            _datasetCombo.BackColor = pick is null ? SystemColors.Window : Color.Gold;
+            _sourceRows.Clear(); _sourceFails.Clear();               // never mix rows across datasets
+            if (_modeButton.Checked && _doc is not null)
+                BuildDataPanel();
+        };
+        PopulateDatasetCombo();
+        tools.Items.Add(_datasetCombo);
         tools.Items.Add(new ToolStripSeparator());
         var fit = new ToolStripButton("Fit")
         {
@@ -301,6 +460,10 @@ public sealed class MainForm : Form
         _outline.AfterSelect += (_, e) =>
         {
             if (_syncingOutline) return; // we moved the highlight, not the user
+            // Data mode locks layout interaction: an outline click must
+            // never re-summon the design selection machinery (belt and
+            // braces — SetMode also disables the tree)
+            if (_canvas.Mode != EditorMode.Design) return;
             if (e.Node?.Tag is System.Xml.Linq.XElement grp)
             {
                 // a Group node selects the WHOLE group
@@ -349,32 +512,88 @@ public sealed class MainForm : Form
 
     private void BuildMenu()
     {
-        var menu = new MenuStrip();
+        var menu = _menuStrip = new MenuStrip();
 
         var file = new ToolStripMenuItem("&File");
         file.DropDownItems.Add("&New…", null, (_, _) => FileNew()).ShortcutKeys(Keys.Control | Keys.N);
         file.DropDownItems.Add("&Open…", null, (_, _) => OpenDialog()).ShortcutKeys(Keys.Control | Keys.O);
-        file.DropDownItems.Add("&Save", null, (_, _) => SaveFile(null)).ShortcutKeys(Keys.Control | Keys.S);
-        file.DropDownItems.Add("Save &As…", null, (_, _) => SaveAsDialog());
+        var recent = new ToolStripMenuItem("Open &Recent");
+        file.DropDownItems.Add(recent);
+        var miClose = (ToolStripMenuItem)file.DropDownItems.Add("&Close", null, (_, _) => CloseFile());
+        miClose.ShortcutKeys(Keys.Control | Keys.W);
+        var miSave = (ToolStripMenuItem)file.DropDownItems.Add("&Save", null, (_, _) => SaveFile(null));
+        miSave.ShortcutKeys(Keys.Control | Keys.S);
+        var miSaveAs = (ToolStripMenuItem)file.DropDownItems.Add("Save &As…", null, (_, _) => SaveAsDialog());
         file.DropDownItems.Add(new ToolStripSeparator());
-        file.DropDownItems.Add("&Print…", null, (_, _) => PrintNow()).ShortcutKeys(Keys.Control | Keys.P);
+        var miPrint = (ToolStripMenuItem)file.DropDownItems.Add("&Print…", null, (_, _) => PrintNow());
+        miPrint.ShortcutKeys(Keys.Control | Keys.P);
         file.DropDownItems.Add(new ToolStripSeparator());
-        file.DropDownItems.Add("&Validate", null, (_, _) => ShowValidation()).ShortcutKeys(Keys.F7);
+        var miValidate = (ToolStripMenuItem)file.DropDownItems.Add("&Validate", null, (_, _) => ShowValidation());
+        miValidate.ShortcutKeys(Keys.F7);
+        file.DropDownItems.Add(new ToolStripSeparator());
+        file.DropDownItems.Add("Co&nnections…", null, (_, _) =>
+        {
+            using var dlg = new ConnectionsDialog();
+            if (dlg.ShowDialog(this) == DialogResult.OK)
+            {
+                _sourceRows.Clear(); _sourceFails.Clear();          // store changed: stale rows out
+                PopulateDatasetCombo();
+                if (_modeButton.Checked && _doc is not null) BuildDataPanel();
+            }
+        });
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add("E&xit", null, (_, _) => Close());
+        // gray out what can't run right now (shortcuts already no-op safely;
+        // this is purely the visual affordance, refreshed as the menu opens)
+        file.DropDownOpening += (_, _) =>
+        {
+            bool doc = _doc is not null;
+            miClose.Enabled = miSave.Enabled = miSaveAs.Enabled = doc;
+            miPrint.Enabled = miValidate.Enabled = doc;
+            RebuildRecentMenu(recent);
+        };
+        RebuildRecentMenu(recent);   // populated before first open too
 
         var edit = new ToolStripMenuItem("&Edit");
         // Undo.Changed already runs OutlineMaybeRefresh — only the canvas needs a poke
-        edit.DropDownItems.Add("&Undo", null, (_, _) => { _doc?.Undo.Undo(); _canvas.Invalidate(); }).ShortcutKeys(Keys.Control | Keys.Z);
-        edit.DropDownItems.Add("&Redo", null, (_, _) => { _doc?.Undo.Redo(); _canvas.Invalidate(); }).ShortcutKeys(Keys.Control | Keys.Y);
+        var miUndo = (ToolStripMenuItem)edit.DropDownItems.Add(
+            "&Undo", null, (_, _) => { _doc?.Undo.Undo(); _canvas.Invalidate(); });
+        miUndo.ShortcutKeys(Keys.Control | Keys.Z);
+        var miRedo = (ToolStripMenuItem)edit.DropDownItems.Add(
+            "&Redo", null, (_, _) => { _doc?.Undo.Redo(); _canvas.Invalidate(); });
+        miRedo.ShortcutKeys(Keys.Control | Keys.Y);
         edit.DropDownItems.Add(new ToolStripSeparator());
-        edit.DropDownItems.Add("&Group", null, (_, _) => GroupSelection()).ShortcutKeys(Keys.Control | Keys.G);
-        edit.DropDownItems.Add("U&ngroup", null, (_, _) => UngroupSelection()).ShortcutKeys(Keys.Control | Keys.Shift | Keys.G);
+        var miGroup = (ToolStripMenuItem)edit.DropDownItems.Add(
+            "&Group", null, (_, _) => GroupSelection());
+        miGroup.ShortcutKeys(Keys.Control | Keys.G);
+        var miUngroup = (ToolStripMenuItem)edit.DropDownItems.Add(
+            "U&ngroup", null, (_, _) => UngroupSelection());
+        miUngroup.ShortcutKeys(Keys.Control | Keys.Shift | Keys.G);
         edit.DropDownItems.Add(new ToolStripSeparator());
-        edit.DropDownItems.Add("&Fields, Maps && Lists…", null, (_, _) => ShowMetadataDialog()).ShortcutKeys(Keys.F4);
+        var miFields = (ToolStripMenuItem)edit.DropDownItems.Add(
+            "&Fields, Maps && Lists…", null, (_, _) => ShowMetadataDialog());
+        miFields.ShortcutKeys(Keys.F4);
         edit.DropDownItems.Add(new ToolStripSeparator());
-        edit.DropDownItems.Add("Bring &Forward", null, (_, _) => Reorder(true)).ShortcutKeys(Keys.Control | Keys.Oemplus);
-        edit.DropDownItems.Add("Send &Backward", null, (_, _) => Reorder(false)).ShortcutKeys(Keys.Control | Keys.OemMinus);
+        var miFwd = (ToolStripMenuItem)edit.DropDownItems.Add(
+            "Bring &Forward", null, (_, _) => Reorder(true));
+        miFwd.ShortcutKeys(Keys.Control | Keys.Oemplus);
+        var miBack = (ToolStripMenuItem)edit.DropDownItems.Add(
+            "Send &Backward", null, (_, _) => Reorder(false));
+        miBack.ShortcutKeys(Keys.Control | Keys.OemMinus);
+        edit.DropDownOpening += (_, _) =>
+        {
+            bool doc = _doc is not null;
+            bool design = doc && !_modeButton.Checked;
+            miUndo.Enabled = design && _doc!.Undo.CanUndo;
+            miUndo.Text = "&Undo" + (design && _doc!.Undo.UndoLabel is { } ul ? $" {ul}" : "");
+            miRedo.Enabled = design && _doc!.Undo.CanRedo;
+            miRedo.Text = "&Redo" + (design && _doc!.Undo.RedoLabel is { } rl ? $" {rl}" : "");
+            miGroup.Enabled = design && _canvas.Selection.Count > 1;
+            miUngroup.Enabled = design && _canvas.Selected is { } sel &&
+                                EditorDoc.GroupContainer(sel.El) is not null;
+            miFields.Enabled = doc;
+            miFwd.Enabled = miBack.Enabled = design && _canvas.Selected is not null;
+        };
 
         var insert = new ToolStripMenuItem("&Insert");
         insert.DropDownItems.Add("&Text", null, (_, _) => InsertObject("text"));
@@ -390,10 +609,26 @@ public sealed class MainForm : Form
         insert.DropDownItems.Add("Bo&x", null, (_, _) => InsertObject("box"));
         insert.DropDownItems.Add(new ToolStripSeparator());
         insert.DropDownItems.Add("La&yer…", null, (_, _) => InsertLayer());
+        insert.DropDownOpening += (_, _) =>
+        {
+            bool can = _doc is not null && !_modeButton.Checked;   // Design mode only
+            foreach (ToolStripItem it in insert.DropDownItems) it.Enabled = can;
+        };
 
         var view = new ToolStripMenuItem("&View");
-        view.DropDownItems.Add("&Design Mode", null, (_, _) => _modeButton.Checked = false);
-        view.DropDownItems.Add("Da&ta Mode", null, (_, _) => _modeButton.Checked = true);
+        _viewDesignItem = (ToolStripMenuItem)view.DropDownItems.Add(
+            "&Design Mode", null, (_, _) => _modeButton.Checked = false);
+        _viewDataItem = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Da&ta Mode", null, (_, _) => _modeButton.Checked = true);
+        view.DropDownItems.Add(new ToolStripSeparator());
+        var miStation = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Enter Print-&Station Mode…", null, (_, _) => EnterStationMode());
+        view.DropDownOpening += (_, _) =>
+        {
+            bool doc = _doc is not null;
+            _viewDesignItem!.Enabled = _viewDataItem!.Enabled = doc;
+            miStation.Enabled = _doc?.Path is not null;   // needs a saved doc
+        };
 
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add("Check for &Updates…", null, async (_, _) => await CheckForUpdates(interactive: true));
@@ -412,8 +647,28 @@ public sealed class MainForm : Form
 
     // ---------- new / insert ----------
 
+    /// <summary>Gate for every action that would discard the current
+    /// document (close / open / new). True = safe to proceed: nothing
+    /// dirty, saved on request, or discard explicitly chosen. False = the
+    /// user cancelled (or cancelled the Save As) — abort the action.</summary>
+    private bool ConfirmDiscard()
+    {
+        if (_doc is null || !_doc.IsDirty) return true;
+        var r = MessageBox.Show(this,
+            $"Save changes to {Path.GetFileName(_doc.Path ?? "(unsaved new label)")}?",
+            "Unsaved changes", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+        if (r == DialogResult.Cancel) return false;
+        if (r == DialogResult.Yes)
+        {
+            SaveFile(null);           // pathless docs route to Save As
+            return !_doc.IsDirty;     // Save As cancelled → still dirty → abort
+        }
+        return true;                  // No = discard
+    }
+
     private void FileNew()
     {
+        if (!ConfirmDiscard()) return;
         using var dlg = new NewLabelDialog();
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         int w = dlg.WidthMils, h = dlg.HeightMils;
@@ -430,6 +685,7 @@ public sealed class MainForm : Form
             </svg>
             """;
         _doc = EditorDoc.Parse(xml);
+        _doc.MarkDirty();   // choosing the canvas size already is work
         _canvas.Doc = _doc;
         _doc.Undo.Changed += OutlineMaybeRefresh; // deletes/undo/redo update the tree
         RefreshDeclaredFieldNames();
@@ -517,8 +773,74 @@ public sealed class MainForm : Form
 
     // ---------- file ----------
 
+    // ---------- recent files ----------
+    // settings.json: recentFiles = newline-joined MRU paths (newest first);
+    // recentMax = how many to keep (Help > Options; default 10, cap 30)
+
+    private const string RecentKey = "recentFiles";
+    private const string RecentMaxKey = "recentMax";
+
+    internal static int RecentMax =>
+        int.TryParse(UpdateChecker.GetSetting(RecentMaxKey), out var n) && n > 0
+            ? Math.Min(n, 30) : 10;
+
+    private static List<string> RecentFiles() =>
+        (UpdateChecker.GetSetting(RecentKey) ?? "")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList();
+
+    private static void PushRecent(string path)
+    {
+        var list = RecentFiles();
+        list.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+        list.Insert(0, path);
+        if (list.Count > RecentMax) list.RemoveRange(RecentMax, list.Count - RecentMax);
+        UpdateChecker.SetSetting(RecentKey, string.Join('\n', list));
+    }
+
+    /// <summary>Rebuild the File > Open Recent submenu: newest first,
+    /// files that vanished from disk grayed out, Clear at the bottom.</summary>
+    private void RebuildRecentMenu(ToolStripMenuItem recent)
+    {
+        recent.DropDownItems.Clear();
+        var list = RecentFiles();
+        if (list.Count > RecentMax) list = list.Take(RecentMax).ToList();
+        foreach (var p in list)
+        {
+            string path = p;
+            var item = new ToolStripMenuItem(Path.GetFileName(path))
+                { ToolTipText = path, Enabled = File.Exists(path) };
+            item.Click += (_, _) =>
+            {
+                if (!ConfirmDiscard()) return;
+                OpenFile(path);
+            };
+            recent.DropDownItems.Add(item);
+        }
+        recent.Enabled = list.Count > 0;
+        if (list.Count == 0) return;
+        recent.DropDownItems.Add(new ToolStripSeparator());
+        recent.DropDownItems.Add("&Clear Recent", null, (_, _) =>
+        {
+            UpdateChecker.SetSetting(RecentKey, null);
+            RebuildRecentMenu(recent);
+        });
+    }
+
+    /// <summary>File > Close: back to the empty no-document state.</summary>
+    private void CloseFile()
+    {
+        if (_doc is null || !ConfirmDiscard()) return;
+        _doc = null;
+        _sourceRows.Clear(); _sourceFails.Clear();
+        _canvas.Doc = null;          // fires SelectionChanged(null) → inspector clears
+        RefreshOutline();
+        if (_modeButton.Checked) BuildDataPanel();   // empties the data pane
+        _statusDoc.Text = "no document";
+    }
+
     private void OpenDialog()
     {
+        if (!ConfirmDiscard()) return;
         using var dlg = new OpenFileDialog
             { Filter = "Etiquette templates (*.svg)|*.svg|All files|*.*" };
         if (dlg.ShowDialog(this) == DialogResult.OK) OpenFile(dlg.FileName);
@@ -538,6 +860,8 @@ public sealed class MainForm : Form
         _doc.Undo.Changed += OutlineMaybeRefresh; // deletes/undo/redo update the tree
         RefreshDeclaredFieldNames();
         _statusDoc.Text = Path.GetFileName(path);
+        _sourceRows.Clear(); _sourceFails.Clear();                 // rows belong to the previous doc
+        PushRecent(path);
         RefreshOutline();
         if (_modeButton.Checked) BuildDataPanel();
     }
@@ -546,7 +870,12 @@ public sealed class MainForm : Form
     {
         if (_doc is null) return;
         if (path is null && _doc.Path is null) { SaveAsDialog(); return; }   // new unsaved doc
-        try { _doc.Save(path); _statusDoc.Text = Path.GetFileName(_doc.Path!); }
+        try
+        {
+            _doc.Save(path);
+            _statusDoc.Text = Path.GetFileName(_doc.Path!);
+            PushRecent(_doc.Path!);   // Save As introduces a brand-new path
+        }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed"); }
     }
 
@@ -567,6 +896,7 @@ public sealed class MainForm : Form
             StartPosition = FormStartPosition.CenterParent,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
         };
+        Ui.AutoScale(dlg);
         Image? logo = null;
         try
         {
@@ -609,6 +939,33 @@ public sealed class MainForm : Form
         if (_doc is null) return;
         using var measurer = new GdiTextMeasurer();
         PrintService.Print(this, _doc, _canvas.ResolvedValues, measurer);
+    }
+
+    /// <summary>Effective printer for direct printing: embedded picker
+    /// (null while "Default printer" is checked), else the pinned name,
+    /// else null = machine default.</summary>
+    private string? PanelPrinter(EtiqTemplate.PanelDef panel) =>
+        panel.Printer == "embedded"
+            ? (_panelPrinterDefault?.Checked != false ? null : _panelPrinterBox?.Text)
+            : panel.Printer;
+
+    /// <summary>Copies/collation for a panel-driven run: fixed:N wins,
+    /// else the embedded controls, else 1/grouped.</summary>
+    private (int Copies, bool Grouped) PanelRun(EtiqTemplate.PanelDef panel) => (
+        panel.FixedCopies ?? (int)(_panelCopies?.Value ?? 1),
+        panel.Collate != "sequenced" &&
+        (panel.Collate == "grouped" || _panelCollate is null || _panelCollate.SelectedIndex != 1));
+
+    /// <summary>Panel-driven single-label print: copies expanded into
+    /// pages; direct mode goes straight to the (named or default) printer
+    /// with no system dialog — the labelprint behavior.</summary>
+    private void PrintNow(EtiqTemplate.PanelDef panel, int copies)
+    {
+        if (_doc is null) return;
+        using var measurer = new GdiTextMeasurer();
+        var pages = Enumerable.Repeat(_canvas.ResolvedValues, Math.Max(1, copies)).ToList();
+        PrintService.PrintBatch(this, _doc, pages, measurer,
+            direct: panel.Print == "direct", printer: PanelPrinter(panel));
     }
 
     private void ShowMetadataDialog()
@@ -882,12 +1239,147 @@ public sealed class MainForm : Form
 
     // ---------- design / data mode ----------
 
+    // ---------- print station ----------
+    // A dedicated kiosk-ish presentation of the SAME window: everything
+    // but the essentials is removed — no menu, no toolbar, no outline, no
+    // inspector; just the label preview, the data panel and the status
+    // bar. Answers the "labelprint for Etiquette templates" need without
+    // a second app.
+    //
+    // Persistence: settings.json key "stationFile" = the template path.
+    // While set, EVERY start of etiqedit opens that template in station
+    // mode — the machine's role, not a per-session flag. Set via View →
+    // Enter Print-Station Mode (persists) or `--station <file>` (transient,
+    // this run only). Exit ONLY via Ctrl+Shift+F12 + typing UNLOCK — no
+    // clickable path, so it cannot be turned off by accident.
+
+    private const string StationFileKey = "stationFile";
+    // station-only: the label re-fits whenever the canvas area resizes
+    private EventHandler? _stationFit;
+    private const Keys StationExitChord = Keys.Control | Keys.Shift | Keys.F12;
+
+    /// <summary>View → Enter Print-Station Mode: persists the current
+    /// (saved) template as this machine's station template and switches
+    /// the UI immediately.</summary>
+    private void EnterStationMode()
+    {
+        if (_doc?.Path is not { } path)
+        {
+            MessageBox.Show(this,
+                "Save the label first — print-station mode reopens it by path on every start.",
+                "Print-Station Mode");
+            return;
+        }
+        if (MessageBox.Show(this,
+                "Turn this machine into a print station for\n\n" +
+                $"    {Path.GetFileName(path)}\n\n" +
+                "etiqedit will open straight into this stripped-down print view on every " +
+                "start until the mode is explicitly turned off.\n\n" +
+                "To exit later: press Ctrl+Shift+F12 and type UNLOCK.",
+                "Enter Print-Station Mode", MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Information) != DialogResult.OK)
+            return;
+        UpdateChecker.SetSetting(StationFileKey, path);
+        StationLock();
+    }
+
+    /// <summary>Apply the station presentation to the running window.</summary>
+    private void StationLock()
+    {
+        _stationLocked = true;
+        _modeButton.Checked = true;      // → SetMode(Data)
+        _modeButton.Enabled = false;
+        // strip the chrome: menu (disable too — invisible menus still fire
+        // their shortcut keys), toolbar, outline pane
+        if (_menuStrip is not null) { _menuStrip.Visible = false; _menuStrip.Enabled = false; }
+        if (_toolStrip is not null) _toolStrip.Visible = false;
+        // the left pane now IS the data-entry pane — keep it; SetMode(Data)
+        // already collapsed the inspector side
+        Text = $"Etiquette Print Station — {Path.GetFileName(_doc?.Path ?? "label")}";
+        // operators don't zoom/pan: keep the label fitted through window
+        // (and splitter) resizes for the life of the lock
+        _stationFit ??= (_, _) => _canvas.FitToWindow();
+        _canvas.Resize -= _stationFit;   // never double-subscribe
+        _canvas.Resize += _stationFit;
+        _canvas.FitToWindow();
+    }
+
+    /// <summary>Restore the full editor (chord + typed confirmation only).</summary>
+    private void StationUnlock()
+    {
+        _stationLocked = false;
+        _modeButton.Enabled = true;
+        if (_menuStrip is not null) { _menuStrip.Visible = true; _menuStrip.Enabled = true; }
+        if (_toolStrip is not null) _toolStrip.Visible = true;
+        Text = "Etiquette Designer";
+        if (_stationFit is not null) _canvas.Resize -= _stationFit;
+        _canvas.FitToWindow();
+    }
+
+    /// <summary>The ONLY way out of station mode: Ctrl+Shift+F12, then the
+    /// word UNLOCK typed in full — deliberate by construction.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (_stationLocked && keyData == StationExitChord)
+        {
+            StationExitPrompt();
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    private void StationExitPrompt()
+    {
+        using var f = new Form
+        {
+            Text = "Exit Print-Station Mode", ClientSize = new Size(360, 130),
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+        };
+        Ui.AutoScale(f);
+        var lbl = new Label
+        {
+            Text = "Type UNLOCK to leave print-station mode and restore the full editor:",
+            Left = 12, Top = 10, Width = 336, Height = 32,
+        };
+        var tb = new TextBox { Left = 12, Top = 48, Width = 336 };
+        var ok = new Button { Text = "Exit station mode", DialogResult = DialogResult.OK, Left = 148, Top = 88, Width = 120, Enabled = false };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 276, Top = 88, Width = 72 };
+        tb.TextChanged += (_, _) => ok.Enabled =
+            tb.Text.Trim().Equals("UNLOCK", StringComparison.Ordinal);
+        f.Controls.AddRange(new Control[] { lbl, tb, ok, cancel });
+        f.AcceptButton = ok;
+        f.CancelButton = cancel;
+        if (f.ShowDialog(this) != DialogResult.OK) return;
+        UpdateChecker.SetSetting(StationFileKey, null);   // off until re-enabled
+        StationUnlock();
+    }
+
     private void SetMode(EditorMode mode)
     {
         _canvas.Mode = mode;
         _modeButton.Text = mode == EditorMode.Design ? "Mode: DESIGN" : "Mode: DATA";
-        _props.Visible = mode == EditorMode.Design;
-        _dataPanel.Visible = mode == EditorMode.Data;
+        bool design = mode == EditorMode.Design;
+        _props.Visible = design;
+        _dataPanel.Visible = !design;
+        // left pane: outline (Design) ↔ data entry (Data); right (inspector)
+        // side collapses entirely in Data mode so the preview gets the room
+        _outline.Visible = design;
+        _outline.Enabled = design;   // belt & braces: tree clicks stay dead in Data mode
+        if (_split2 is not null) _split2.Panel2Collapsed = !design;
+        if (_split1 is not null && _split1.Width > 0)
+        {
+            try
+            {
+                float uiF = Ui.Factor(this);
+                // data entry needs room for its 300px-wide inputs; the
+                // outline tree is happy narrower — remember nothing, just
+                // set a sensible width for what the pane now holds
+                _split1.SplitterDistance = (int)((design ? 260 : 340) * uiF);
+            }
+            catch (ArgumentOutOfRangeException) { /* tiny window: keep as-is */ }
+        }
         if (mode == EditorMode.Data)
         {
             _canvas.Select(null);
@@ -905,30 +1397,78 @@ public sealed class MainForm : Form
         _previewTimer?.Stop();
         _previewTimer?.Dispose();
         _previewTimer = null;
-        _dataPanel.Controls.Clear();
+        _dataPanel.SuspendLayout();
+        // AutoScroll gotcha: controls added while the panel is scrolled are
+        // placed relative to the SCROLLED origin — a rebuild after the old
+        // panel was scrolled (or after opening another file in Data mode)
+        // lands everything outside the viewport and the pane looks empty.
+        _dataPanel.AutoScrollPosition = Point.Empty;
+        var old = _dataPanel.Controls.Cast<Control>().ToList();
+        _dataPanel.Controls.Clear();          // Clear does NOT dispose
+        foreach (var c in old) c.Dispose();
         _promptBoxes.Clear();
         _listCombos.Clear();
         _listDisplayToKey.Clear();
-        if (_doc is null) return;
+        if (_doc is null)
+        {
+            if (_stationLocked)   // locked with a missing template: say why
+                _dataPanel.Controls.Add(new Label
+                {
+                    Left = 10, Top = 12, Width = _dataPanel.Width - 20, Height = 200,
+                    ForeColor = Color.Firebrick,
+                    Text = "Print-station template missing or unreadable:\n\n" +
+                           (UpdateChecker.GetSetting(StationFileKey) ?? "(unknown)") +
+                           "\n\nRestore the file and restart etiqedit — or press " +
+                           "Ctrl+Shift+F12 and type UNLOCK to exit station mode.",
+                });
+            _dataPanel.ResumeLayout();
+            return;
+        }
 
-        var template = EtiqTemplate.Parse(_doc.Xml.ToString());
+        EtiqTemplate template;
+        try { template = EtiqTemplate.Parse(_doc.Xml.ToString()); }
+        catch (Exception ex)
+        {
+            // never leave the pane silently blank — say why
+            _dataPanel.Controls.Add(new Label
+            {
+                Left = 10, Top = 12, Width = _dataPanel.Width - 20, Height = 120,
+                ForeColor = Color.Firebrick, Text = "Template error: " + ex.Message,
+            });
+            _dataPanel.ResumeLayout();
+            return;
+        }
 
         // debounced auto-preview: any edit re-resolves ~350ms after the last
         // keystroke; errors go to the inline status line, never a popup
         _previewTimer = new System.Windows.Forms.Timer { Interval = 350 };
-        _previewTimer.Tick += (_, _) => { _previewTimer!.Stop(); RefreshPreview(template); };
-        void Touched() { _previewTimer!.Stop(); _previewTimer.Start(); }
+        _previewTimer.Tick += async (_, _) => { _previewTimer!.Stop(); await RefreshPreviewAsync(template); };
+        // NULL-SAFE: a panel rebuild disposes the old controls AFTER
+        // clearing _previewTimer — disposing the focused box fires its
+        // Leave handler, which lands here with no timer
+        void Touched() { _previewTimer?.Stop(); _previewTimer?.Start(); }
 
-        int y = 12;
+        // built at runtime, AFTER the form's one-shot DPI scale pass ran —
+        // Control.Scale never touches later-added children, so factor every
+        // hand-placed coordinate here explicitly
+        float uf = Ui.Factor(this);
+        int S(int v) => (int)(v * uf);
+
+        int y = S(12);
         void AddLabel(string text)
         {
             _dataPanel.Controls.Add(new Label
-                { Text = text, Left = 10, Top = y, Width = 320, AutoSize = false });
-            y += 20;
+                { Text = text, Left = S(10), Top = y, Width = S(320), AutoSize = false });
+            y += S(20);
         }
 
+        var panel = template.Panel;
+        _panelCopies = null; _panelCollate = null;   // recreated below if embedded
+        _panelPrinterDefault = null; _panelPrinterBox = null;
+
         AddLabel("DATA MODE — layout locked");
-        y += 8;
+        y += S(8);
+        if (panel.ButtonsAt == "top") EmitButtons();
         void EmitPrompt(EtiqTemplate.Field f)
         {
             AddLabel(f.Caption ?? f.Name + ":");
@@ -936,7 +1476,7 @@ public sealed class MainForm : Form
             // the resolver normalizes regardless, this just mirrors it live
             var tb = new TextBox
             {
-                Left = 10, Top = y, Width = 300,
+                Left = S(10), Top = y, Width = S(300),
                 CharacterCasing = f.Case switch
                 {
                     "upper" => CharacterCasing.Upper,
@@ -946,9 +1486,12 @@ public sealed class MainForm : Form
                 },
             };
             tb.TextChanged += (_, _) => Touched();
+            // remote sources gate on focus (see FetchSourceColumn): leaving
+            // the box is the "entry done" signal, so refresh again then
+            tb.Leave += (_, _) => Touched();
             _promptBoxes[f.Name] = tb;
             _dataPanel.Controls.Add(tb);
-            y += 34;
+            y += S(34);
         }
         // embedded pick lists: one shared selection per list drives every
         // field bound to it (the "set" behavior); the box is type-to-search
@@ -957,7 +1500,7 @@ public sealed class MainForm : Form
             AddLabel(l.Caption ?? l.Name + ":");
             var cb = new ComboBox
             {
-                Left = 10, Top = y, Width = 300,
+                Left = S(10), Top = y, Width = S(300),
                 DropDownStyle = ComboBoxStyle.DropDown,
                 AutoCompleteMode = AutoCompleteMode.SuggestAppend,
                 AutoCompleteSource = AutoCompleteSource.ListItems,
@@ -967,7 +1510,7 @@ public sealed class MainForm : Form
             cb.SelectedIndexChanged += (_, _) => Touched();
             cb.TextChanged += (_, _) => Touched();
             _dataPanel.Controls.Add(cb);
-            y += 34;
+            y += S(34);
         }
 
         // panel order = FIELD DECLARATION ORDER (the F4 Fields tab): a
@@ -975,46 +1518,160 @@ public sealed class MainForm : Form
         // bound field is declared; unreferenced lists follow at the end
         var emittedLists = new HashSet<string>();
         var listsByName = template.Lists.ToDictionary(l => l.Name);
+        // collect the inputs as (token, emit) pairs, then apply the
+        // template's explicit order= (unlisted inputs keep declaration
+        // order — OrderBy is stable)
+        var inputs = new List<(string Tok, Action Emit)>();
         foreach (var f in template.Fields)
         {
-            if (f.Source == "prompt") EmitPrompt(f);
+            if (f.PanelHide) continue;   // etiq:panel-level opt-out per field
+            var ff = f;
+            if (f.Source == "prompt")
+                inputs.Add(($"field:{f.Name}", () => EmitPrompt(ff)));
+            else if (f.Source == "epicor" && f.Override)
+                inputs.Add(($"field:{f.Name}", () =>
+                {
+                    // overrideable pull: empty box = fetched value (shown as
+                    // ghost text once resolved); typing beats the pull
+                    EmitPrompt(ff);
+                    _promptBoxes[ff.Name].PlaceholderText = "(from source)";
+                }));
             else if (f.Source == "list" && f.ListRef is { } lr &&
-                     emittedLists.Add(lr) && listsByName.TryGetValue(lr, out var l))
-                EmitList(l);
+                     emittedLists.Add(lr) && listsByName.TryGetValue(lr, out var l) &&
+                     !l.PanelHide)
+            {
+                var ll = l;
+                inputs.Add(($"list:{l.Name}", () => EmitList(ll)));
+            }
         }
-        foreach (var l in template.Lists.Where(l => emittedLists.Add(l.Name)))
-            EmitList(l);
-
-        var preview = new Button { Text = "Refresh Preview", Left = 10, Top = y + 6, Width = 145 };
-        preview.Click += (_, _) => RefreshPreview(template);
-        _dataPanel.Controls.Add(preview);
-
-        var print = new Button { Text = "Print…", Left = 165, Top = y + 6, Width = 145 };
-        print.Click += (_, _) =>
+        foreach (var l in template.Lists.Where(l => !l.PanelHide && emittedLists.Add(l.Name)))
         {
-            if (!RefreshPreview(template)) return;   // never print a failed resolve
-            PrintNow();
-        };
-        _dataPanel.Controls.Add(print);
-        y += 36;
-
-        // batch path: one label per row of a list (the print-station run)
-        foreach (var l in template.Lists.Where(l => l.Rows.Count > 0))
-        {
-            var all = new Button
-                { Text = $"Print All: {l.Name} ({l.Rows.Count})…", Left = 10, Top = y + 6, Width = 300 };
-            var list = l;
-            all.Click += (_, _) => PrintAllRows(template, list);
-            _dataPanel.Controls.Add(all);
-            y += 36;
+            var ll = l;
+            inputs.Add(($"list:{l.Name}", () => EmitList(ll)));
         }
+        if (panel.Order.Length > 0)
+            inputs = inputs.OrderBy(i =>
+            {
+                int idx = Array.IndexOf(panel.Order, i.Tok);
+                return idx < 0 ? int.MaxValue : idx;
+            }).ToList();
+        foreach (var (_, emit) in inputs) emit();
+
+        // embedded copies + collation (etiq:panel copies="embedded"):
+        // collation only matters past 1 copy — grayed until then
+        if (panel.Copies == "embedded")
+        {
+            AddLabel("Copies:");
+            var cn = new NumericUpDown
+                { Left = S(10), Top = y, Width = S(70), Minimum = 1, Maximum = 999, Value = 1 };
+            _dataPanel.Controls.Add(cn);
+            _panelCopies = cn;
+            // collation ONLY matters when a single run yields MORE THAN ONE
+            // page at 1 copy (a Print All batch) AND copies > 1 — a single
+            // label collates identically either way. collate="ask" hides
+            // the selector entirely; the popup covers the rare case.
+            bool batchPossible = template.Lists.Any(l => l.Rows.Count > 0);
+            if (panel.Collate != "ask")
+            {
+                var cb = new ComboBox
+                {
+                    Left = S(90), Top = y, Width = S(150),
+                    DropDownStyle = ComboBoxStyle.DropDownList, Enabled = false,
+                };
+                cb.Items.AddRange(new object[] { "grouped (1-1-2-2)", "sequenced (1-2-1-2)" });
+                cb.SelectedIndex = panel.Collate == "sequenced" ? 1 : 0;
+                cn.ValueChanged += (_, _) =>
+                    cb.Enabled = batchPossible && cn.Value > 1 && panel.Collate == "choose";
+                _dataPanel.Controls.Add(cb);
+                _panelCollate = cb;
+            }
+            y += S(34);
+        }
+
+        // printer picker (etiq:panel printer="embedded"): labelprint-style
+        // — "Default printer" checked keeps the machine default; unchecking
+        // enables the installed-printer list
+        if (panel.Printer == "embedded")
+        {
+            AddLabel("Printer:");
+            var dflt = new CheckBox
+                { Text = "Default printer", Left = S(10), Top = y, AutoSize = true, Checked = true };
+            var pick = new ComboBox
+            {
+                Left = S(10), Top = y + S(26), Width = S(300),
+                DropDownStyle = ComboBoxStyle.DropDownList, Enabled = false,
+            };
+            try
+            {
+                foreach (string pr in System.Drawing.Printing.PrinterSettings.InstalledPrinters)
+                    pick.Items.Add(pr);
+                var def = new System.Drawing.Printing.PrinterSettings();
+                if (def.IsValid) pick.SelectedItem = def.PrinterName;
+            }
+            catch { /* spooler trouble: list stays empty */ }
+            dflt.CheckedChanged += (_, _) => pick.Enabled = !dflt.Checked;
+            _dataPanel.Controls.Add(dflt);
+            _dataPanel.Controls.Add(pick);
+            _panelPrinterDefault = dflt; _panelPrinterBox = pick;
+            y += S(60);
+        }
+
+        // action buttons: which, in what order, and where — etiq:panel
+        // buttons= / buttons-at= (defaults reproduce the historical set)
+        void EmitButtons()
+        {
+            int x = S(10);
+            void Btn(string text, int w, Action onClick)
+            {
+                if (x + S(w) > S(330)) { x = S(10); y += S(34); }   // wrap
+                var b = new Button { Text = text, Left = x, Top = y + S(6), Width = S(w), Height = S(28) };
+                b.Click += (_, _) => onClick();
+                _dataPanel.Controls.Add(b);
+                x += S(w) + S(6);
+            }
+            foreach (var kind in panel.Buttons)
+                switch (kind)
+                {
+                    case "preview":
+                        Btn("Refresh Preview", 110, async () =>
+                            { _sourceFails.Clear(); await RefreshPreviewAsync(template); });
+                        break;
+                    case "print":
+                        Btn(panel.Print == "direct" ? "Print" : "Print…", 90, () =>
+                        {
+                            if (!RefreshPreview(template)) return;   // never print a failed resolve
+                            PrintNow(panel, PanelRun(panel).Copies);
+                        });
+                        break;
+                    case "printall":
+                        foreach (var l in template.Lists.Where(l => l.Rows.Count > 0))
+                        {
+                            var list = l;
+                            Btn($"Print All: {l.Name} ({l.Rows.Count})…", 300,
+                                () => PrintAllRows(template, list));
+                        }
+                        break;
+                    case "clear":
+                        Btn("Clear", 90, () =>
+                        {
+                            _previewTimer?.Stop();   // one refresh at the end, not per box
+                            foreach (var tb in _promptBoxes.Values) tb.Text = "";
+                            foreach (var cb in _listCombos.Values) { cb.SelectedIndex = -1; cb.Text = ""; }
+                            RefreshPreview(template);
+                        });
+                        break;
+                }
+            y += S(40);
+        }
+        if (panel.ButtonsAt != "top") EmitButtons();
 
         _dataStatus = new Label
         {
-            Left = 10, Top = y + 10, Width = 310, Height = 64, AutoSize = false,
+            Left = S(10), Top = y + S(10), Width = S(310), Height = S(140), AutoSize = false,
             ForeColor = SystemColors.GrayText,
         };
         _dataPanel.Controls.Add(_dataStatus);
+        _dataPanel.ResumeLayout();
 
         RefreshPreview(template);
     }
@@ -1041,7 +1698,10 @@ public sealed class MainForm : Form
             sel[l.Name] = key;
             try
             {
-                string d = new FieldResolver(template, BuildResolveContext(sel)).Resolve(df);
+                // remote OFF: this resolves once PER ROW while filling a
+                // picker — a source fetch here would mean one HTTP call per
+                // row (the multi-minute freeze); rows must render offline
+                string d = new FieldResolver(template, BuildResolveContext(sel, remote: false)).Resolve(df);
                 if (!string.IsNullOrWhiteSpace(d)) return d.Replace('\n', ' ');
             }
             catch (ResolveException) { /* fall through to the heuristic */ }
@@ -1058,7 +1718,7 @@ public sealed class MainForm : Form
         string? filterVal = null;
         if (l.FilterRef is not null && l.FilterColumn is not null)
         {
-            try { filterVal = new FieldResolver(template, BuildResolveContext()).Resolve(l.FilterRef); }
+            try { filterVal = new FieldResolver(template, BuildResolveContext(remote: false)).Resolve(l.FilterRef); }
             catch (ResolveException) { filterVal = null; }   // unresolved filter = no filtering
         }
         _listFilterVal[l.Name] = filterVal;
@@ -1107,21 +1767,202 @@ public sealed class MainForm : Form
         return sel;
     }
 
-    private ResolveContext BuildResolveContext(Dictionary<string, string>? listOverride = null)
+    private void PopulateDatasetCombo()
+    {
+        if (_datasetCombo is null) return;
+        var names = new List<string>();
+        try
+        {
+            foreach (var c in ConnectionsStore.Load(ConnectionsPath))
+                foreach (var ds in c.Datasets.Keys)
+                    if (!names.Contains(ds, StringComparer.OrdinalIgnoreCase)) names.Add(ds);
+        }
+        catch { /* unreadable store: picker stays empty */ }
+        string current = _datasetCombo.SelectedIndex <= 0 ? "" : _datasetCombo.Text;
+        _datasetCombo.Items.Clear();
+        string dflt = UpdateChecker.GetSetting("dataset") is { } md
+            ? $"(default: {md})" : "(default dataset)";
+        _datasetCombo.Items.Add(dflt);
+        foreach (var n in names) _datasetCombo.Items.Add(n);
+        _datasetCombo.SelectedIndex = current != "" && _datasetCombo.Items.Contains(current)
+            ? _datasetCombo.Items.IndexOf(current) : 0;
+        _datasetCombo.Visible = names.Count > 0;   // no datasets anywhere = no picker
+    }
+
+    /// <summary>Provider behind ResolveContext.SourceColumn: fetch (once
+    /// per param signature) the declared source's row and return one
+    /// column. Runs synchronously inside resolve — the preview is already
+    /// debounced, and print wants the blocking semantics anyway.</summary>
+    private string? FetchSourceColumn(EtiqTemplate template, ResolveContext ctx,
+                                      IReadOnlySet<string> focusedPrompts,
+                                      string sourceName, string column)
+    {
+        var src = template.Sources.FirstOrDefault(x => x.Name == sourceName)
+            ?? throw new InvalidOperationException($"source '{sourceName}' is not declared");
+        if (!_fetchingSources.TryAdd(sourceName, 0))
+            throw new InvalidOperationException(
+                $"source '{sourceName}' is part of a circular source-parameter chain");
+        try
+        {
+            // param/filter values: "{Field}" resolves through the SAME
+            // context (prompts, lists, even other sources); literals pass
+            string Val(string raw) => raw.StartsWith('{') && raw.EndsWith('}')
+                ? new FieldResolver(template, ctx).Resolve(raw[1..^1])
+                : raw;
+            var pars = src.Params.ToDictionary(kv => kv.Key, kv => Val(kv.Value));
+            var fils = src.Filters.ToDictionary(kv => kv.Key, kv => Val(kv.Value));
+
+            string sig = sourceName + "\x1f" + (_sessionDataset ?? "") + "\x1f" +
+                string.Join("\x1f", pars.Concat(fils).OrderBy(kv => kv.Key)
+                    .Select(kv => kv.Key + "=" + kv.Value));
+            if (!_sourceRows.TryGetValue(sig, out var row))
+            {
+                // NO pull until entry is DONE: every field-fed value must be
+                // non-empty AND its prompt box must not be mid-edit
+                // (focused) — otherwise each keystroke's debounce tick
+                // would hit the service with partial values ("1", "12",
+                // "123"…). The box's Leave handler re-runs the preview once
+                // entry commits; a value already fetched (cache hit above)
+                // stays visible regardless of focus.
+                foreach (var raw in src.Params.Values.Concat(src.Filters.Values))
+                {
+                    if (!raw.StartsWith('{') || !raw.EndsWith('}')) continue;
+                    string rf = raw[1..^1];
+                    if (string.IsNullOrWhiteSpace(Val(raw)))
+                        throw new InvalidOperationException($"waiting for {rf}");
+                    if (focusedPrompts.Contains(rf))
+                        throw new InvalidOperationException($"waiting for {rf} (still typing)");
+                }
+                var conns = ConnectionsStore.Load(ConnectionsPath);
+                var conn = conns.FirstOrDefault(c =>
+                        c.Name.Equals(src.Connection, StringComparison.OrdinalIgnoreCase))
+                    ?? throw new InvalidOperationException(
+                        $"no connection named '{src.Connection}' on this machine " +
+                        "(File > Connections… to set it up)");
+                if (!conn.Type.Equals("epicor", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        $"connection '{conn.Name}' is type '{conn.Type}' — etiq:source baq= needs an epicor connection");
+                if (_sourceFails.TryGetValue(sig, out var prevFail))
+                    throw new InvalidOperationException(prevFail);   // no auto-retry storm
+                string? ds = src.Dataset ?? ActiveDataset;
+                using var client = new EpicorClient(conn.ToEpicorConfig(ds));
+                try
+                {
+                    row = client.FetchSourceRowAsync(src.Baq ?? src.Query ?? "", pars, fils)
+                        .GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    _sourceFails[sig] = ex.Message;
+                    throw;
+                }
+                _sourceRows[sig] = row;
+                if (_sourceRows.Count > 64) _sourceRows.Clear(); _sourceFails.Clear();   // crude cap
+            }
+            if (!row.TryGetValue(column, out var v)) return null;
+            return v.ValueKind == System.Text.Json.JsonValueKind.String
+                ? v.GetString() : v.ToString();
+        }
+        finally { _fetchingSources.TryRemove(sourceName, out _); }
+    }
+
+    private ResolveContext BuildResolveContext(Dictionary<string, string>? listOverride = null,
+                                               bool remote = true)
     {
         string counterFile = Path.Combine(Path.GetTempPath(), "etiqedit-preview-counters.json");
-        return new ResolveContext
+        // parsed ONCE per context — the SourceColumn lambda runs per column
+        var tmpl = _doc is not null && _doc.Xml.Descendants(EtiqTemplate.Ns + "source").Any()
+            ? EtiqTemplate.Parse(_doc.Xml.ToString()) : null;
+        // captured HERE: Control.Focused must be read on the UI thread, and
+        // the resolve may run on a background task
+        var focused = _promptBoxes.Where(kv => kv.Value.Focused)
+            .Select(kv => kv.Key).ToHashSet();
+        ResolveContext ctx = null!;
+        ctx = new ResolveContext
         {
             PromptValues = _promptBoxes.ToDictionary(kv => kv.Key, kv => kv.Value.Text),
             ListSelections = listOverride ?? CurrentListSelections(),
             Counters = new LocalFileCounterProvider(counterFile),   // local serials (no Epicor ctx yet)
             EpicorColumn = _ => null,
             Rest = (_, _, _) => null,
+            // the lambda runs after ctx is assigned — safe self-reference
+            SourceColumn = tmpl is null || !remote ? null
+                : (src, col) => FetchSourceColumn(tmpl, ctx, focused, src, col),
         };
+        return ctx;
+    }
+
+    private bool _previewBusy, _previewAgain;
+
+    /// <summary>Background preview resolve: remote source fetches must
+    /// never block the UI thread (connection setup alone can take seconds
+    /// — the app looked FROZEN). One resolve in flight at a time; a
+    /// request arriving mid-flight runs once more at the end.</summary>
+    private async Task RefreshPreviewAsync(EtiqTemplate template)
+    {
+        if (_previewBusy) { _previewAgain = true; return; }
+        _previewBusy = true;
+        try
+        {
+            var ctx = BuildResolveContext();   // reads controls: UI thread
+            bool remote = template.Sources.Count > 0;
+            if (remote && _dataStatus is not null)
+            {
+                _dataStatus.ForeColor = SystemColors.GrayText;
+                _dataStatus.Text = "Resolving…";
+            }
+            // expected failures come back as a VALUE, not an exception —
+            // a ResolveException crossing the Task boundary made VS's
+            // Just-My-Code debugger break as "user-unhandled" even though
+            // it was caught
+            var (resolved, err) = await Task.Run(() =>
+            {
+                try
+                {
+                    return (new FieldResolver(template, ctx).ResolveAll(), (string?)null);
+                }
+                catch (ResolveException ex)
+                {
+                    return ((Dictionary<string, string>?)null, ex.Message);
+                }
+            });
+            if (resolved is null)
+            {
+                if (_dataStatus is not null)
+                {
+                    _dataStatus.ForeColor = Color.Firebrick;
+                    _dataStatus.Text = err;
+                }
+                return;
+            }
+            _canvas.ResolvedValues = resolved;
+            _canvas.Invalidate();
+            foreach (var l in template.Lists)
+                if (l.FilterRef is { } fr && l.FilterColumn is not null &&
+                    _listCombos.TryGetValue(l.Name, out var cb) &&
+                    resolved.GetValueOrDefault(fr) != _listFilterVal.GetValueOrDefault(l.Name))
+                    RebuildListItems(template, l, cb);
+            foreach (var f in template.Fields)
+                if (f.Source == "epicor" && f.Override &&
+                    _promptBoxes.TryGetValue(f.Name, out var box) &&
+                    resolved.TryGetValue(f.Name, out var rv))
+                    box.PlaceholderText = rv == "" ? "(from source)" : rv;
+            if (_dataStatus is not null)
+            {
+                _dataStatus.ForeColor = SystemColors.GrayText;
+                _dataStatus.Text = $"Preview OK — {resolved.Count} field(s) resolved.";
+            }
+        }
+        finally
+        {
+            _previewBusy = false;
+            if (_previewAgain) { _previewAgain = false; _previewTimer?.Start(); }
+        }
     }
 
     /// <summary>Resolve into the canvas preview. Errors show on the inline
-    /// status line (this runs on every keystroke). Returns success.</summary>
+    /// status line. SYNCHRONOUS — used by the PRINT path, where blocking
+    /// until the data is in hand is exactly right. Returns success.</summary>
     private bool RefreshPreview(EtiqTemplate template)
     {
         try
@@ -1179,9 +2020,25 @@ public sealed class MainForm : Form
             if (MessageBox.Show(this, msg, "Print All", MessageBoxButtons.OKCancel)
                 != DialogResult.OK) return;
         }
-        var opts = AskCopies(this, pages.Count, list.Name);
-        if (opts is null) return;
-        var (copies, grouped) = opts.Value;
+        var panelCfg = template.Panel;
+        int copies; bool grouped;
+        if (panelCfg.Copies == "ask")
+        {
+            var opts = AskCopies(this, pages.Count, list.Name);
+            if (opts is null) return;
+            (copies, grouped) = opts.Value;
+        }
+        else
+        {
+            (copies, grouped) = PanelRun(panelCfg);   // embedded/fixed: no dialog
+            // collate="ask": no on-form selector — ask only when the run
+            // actually multiplies more than one page
+            if (panelCfg.Collate == "ask" && copies > 1 && pages.Count > 1)
+                grouped = MessageBox.Show(this,
+                    $"Group copies together (1-1-2-2)?\n\nYes = grouped, No = sequenced (1-2-1-2).",
+                    "Collation", MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question) == DialogResult.Yes;
+        }
         var final = pages;
         if (copies > 1)
         {
@@ -1193,7 +2050,8 @@ public sealed class MainForm : Form
                 for (int c = 0; c < copies; c++) final.AddRange(pages);
         }
         using var measurer = new GdiTextMeasurer();
-        PrintService.PrintBatch(this, _doc, final, measurer);
+        PrintService.PrintBatch(this, _doc, final, measurer,
+            direct: panelCfg.Print == "direct", printer: PanelPrinter(panelCfg));
     }
 
     /// <summary>Copies + arrangement for a batch. We expand copies into
@@ -1208,6 +2066,7 @@ public sealed class MainForm : Form
             StartPosition = FormStartPosition.CenterParent,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
         };
+        Ui.AutoScale(f);
         var lbl = new Label
             { Text = $"Copies of each of the {labels} \"{listName}\" labels:", Left = 12, Top = 14, Width = 240 };
         var num = new NumericUpDown
@@ -1342,6 +2201,7 @@ public sealed class NewLabelDialog : Form
         MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         ClientSize = new Size(260, 150);
+        Ui.AutoScale(this);
 
         _unit.Items.AddRange(new object[] { "in", "mm" });
         _unit.SelectedIndex = 0;
@@ -1353,11 +2213,11 @@ public sealed class NewLabelDialog : Form
             _w.Increment = mm ? 1 : 0.25m; _h.Increment = mm ? 1 : 0.25m;
         };
 
-        Controls.Add(new Label { Text = "Width:", Left = 12, Top = 15, Width = 60 });
+        Controls.Add(new Label { Text = "Width:", Left = 12, Top = 15, AutoSize = true });
         _w.SetBounds(80, 12, 90, 24); Controls.Add(_w);
-        Controls.Add(new Label { Text = "Height:", Left = 12, Top = 47, Width = 60 });
+        Controls.Add(new Label { Text = "Height:", Left = 12, Top = 47, AutoSize = true });
         _h.SetBounds(80, 44, 90, 24); Controls.Add(_h);
-        Controls.Add(new Label { Text = "Units:", Left = 12, Top = 79, Width = 60 });
+        Controls.Add(new Label { Text = "Units:", Left = 12, Top = 79, AutoSize = true });
         _unit.SetBounds(80, 76, 90, 24); Controls.Add(_unit);
 
         var ok = new Button { Text = "Create", DialogResult = DialogResult.OK };

@@ -200,6 +200,7 @@ public static class UpdateApplier
         public ProgressForm(string assetName)
         {
             Text = "Updating etiqedit";
+            Ui.AutoScale(this);
             ClientSize = new Size(380, 100);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterParent;

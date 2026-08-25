@@ -50,19 +50,23 @@ public sealed class InspectorPanel : UserControl
 
     public InspectorPanel()
     {
+        Ui.AutoScale(this);   // scales the fixed 96px label column etc. at high DPI
         AutoScroll = true;
         _table = NewTable();
         Controls.Add(_table);
     }
 
-    private static TableLayoutPanel NewTable()
+    private TableLayoutPanel NewTable()
     {
         var t = new TableLayoutPanel
         {
             Dock = DockStyle.Top, ColumnCount = 2, AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(4, 4, 4, 8),
         };
-        t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        // Control.Scale never touches absolute column styles — apply the
+        // DPI/font factor by hand (Factor is 1 for the ctor placeholder,
+        // correct for every real build, which happens parented)
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, (int)(96 * Ui.Factor(this))));
         t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         return t;
     }
@@ -213,7 +217,13 @@ public sealed class InspectorPanel : UserControl
 
     private void Rebuild()
     {
-        bool redraw = IsHandleCreated;
+        // WM_SETREDRAW only when actually on screen: re-enabling it (TRUE)
+        // sets the HWND's WS_VISIBLE style directly, so doing the dance on a
+        // HIDDEN panel (Data mode: SelectionChanged fires while the
+        // inspector is Visible=false) makes the native window visible while
+        // WinForms still believes it is hidden — it then sits as a blank
+        // gray sheet over the data pane until the next real Visible flip.
+        bool redraw = IsHandleCreated && Visible;
         if (redraw) SendMessage(Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
         SuspendLayout();
 
@@ -329,24 +339,31 @@ public sealed class InspectorPanel : UserControl
             allowEmpty: true, hint: "baseline-to-baseline; empty = 1.2 × font size");
 
         AddHeader("Fit box");
-        AddCombo("Fit mode", new[] { "", "none", "width", "box" },
-            () => (string?)O.El.Attribute("data-fit") ?? "",
-            v => SetAttr(O, "data-fit", v == "" ? null : v, "set fit mode"));
+        // absent attributes show an explicit token, never a blank: a blank
+        // reads as "nothing", but omission means "program default" — which a
+        // future version may define differently from today's inference
+        AddCombo("Fit mode", new[] { "auto", "none", "width", "box" },
+            () => (string?)O.El.Attribute("data-fit") ?? "auto",
+            v => SetAttr(O, "data-fit", v == "auto" ? null : v, "set fit mode"),
+            hint: "auto = inferred: width if a box width is set, else none");
         AddNum("Width", () => O.GetNum("data-width"),
             v => SetAttr(O, "data-width", v <= 0 ? null : N(v), "set width"),
             allowEmpty: true, hint: "empty = natural width");
         AddNum("Height", () => O.GetNum("data-height"),
             v => SetAttr(O, "data-height", v <= 0 ? null : N(v), "set height"),
             allowEmpty: true, hint: "empty = natural height");
-        AddCombo("Align", new[] { "", "left", "center", "right" },
-            () => (string?)O.El.Attribute("data-align") ?? "",
-            v => SetAttr(O, "data-align", v is "" or "left" ? null : v, "set align"));
-        AddCombo("Vert. align", new[] { "", "top", "middle", "bottom" },
-            () => (string?)O.El.Attribute("data-valign") ?? "",
-            v => SetAttr(O, "data-valign", v is "" or "top" ? null : v, "set valign"));
-        AddCombo("Overflow", new[] { "", "shrink", "clip", "wrap" },
-            () => (string?)O.El.Attribute("data-overflow") ?? "",
-            v => SetAttr(O, "data-overflow", v == "" ? null : v, "set overflow"));
+        AddCombo("Align", new[] { "default", "left", "center", "right" },
+            () => (string?)O.El.Attribute("data-align") ?? "default",
+            v => SetAttr(O, "data-align", v == "default" ? null : v, "set align"),
+            hint: "default = left");
+        AddCombo("Vert. align", new[] { "default", "top", "middle", "bottom" },
+            () => (string?)O.El.Attribute("data-valign") ?? "default",
+            v => SetAttr(O, "data-valign", v == "default" ? null : v, "set valign"),
+            hint: "default = top");
+        AddCombo("Overflow", new[] { "default", "shrink", "clip", "wrap" },
+            () => (string?)O.El.Attribute("data-overflow") ?? "default",
+            v => SetAttr(O, "data-overflow", v == "default" ? null : v, "set overflow"),
+            hint: "default = shrink");
 
         AddHeader("Data");
         AddCombo("Field", FieldNames(), () => (string?)O.El.Attribute("data-field") ?? "",
@@ -869,6 +886,22 @@ public sealed class InspectorPanel : UserControl
         {
             cb.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
             cb.AutoCompleteSource = AutoCompleteSource.ListItems;
+            // FIRST build of a row set: Load() runs before the combo has a
+            // handle, so its highlight-clear is lost — when the handle is
+            // created, WinForms pushes Text into the new edit control and
+            // re-selects it all. Clear again at that moment. (Cached sets
+            // revisited later already have handles, which is why only the
+            // first visit showed the highlight.)
+            // ... and clearing INSIDE HandleCreated is still too early: the
+            // cached Text is pushed into the fresh edit control (and
+            // selected) after this event returns. Defer past the whole
+            // handle-creation message sequence with BeginInvoke.
+            cb.HandleCreated += (_, _) => cb.BeginInvoke(() =>
+            {
+                if (cb.IsDisposed || cb.Focused) return;
+                cb.SelectionStart = cb.Text.Length;
+                cb.SelectionLength = 0;
+            });
         }
         void Load()
         {

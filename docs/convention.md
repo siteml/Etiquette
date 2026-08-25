@@ -194,7 +194,14 @@ can validate and prompt:
 ```
 
 Source kinds:
-- `epicor` — engine fills from a REST/BAQ row (column = BAQ column name)
+- `epicor` — engine fills from a REST/BAQ row (`column` = BAQ column name
+  — NOTE these are alias-prefixed display-field ids, e.g.
+  `JobHead_JobNum`, not bare column names). With `from=` the field reads
+  a **declared source** (see "Declared sources" below); without it, the
+  engine's single implicit BAQ (legacy labelprint-style configuration).
+  `override="true"` lets the operator type over the pulled value at
+  print time: a non-empty entry wins, an empty one falls back to the
+  fetch.
 - `rest`   — generic REST source: `connection` names a profile (base URL,
   auth style, headers) defined in an engine-side data file — connections
   are configuration, never template content; `query` is the
@@ -256,6 +263,69 @@ them; engine implementation stubbed until needed):
 Validator: unknown `source` values are errors; reserved-but-unimplemented
 kinds validate structurally but fail at print time with "not yet
 implemented".
+
+## Declared sources (multi-BAQ fetches)
+
+A template may declare any number of **sources** — one remote fetch each,
+yielding one row whose columns any number of fields consume:
+
+```xml
+<etiq:source name="LotInfo" connection="Epicor" baq="MFG-LotLabel"
+             param-LotNum="{LotNum}" filter-Plant="MfgSys"/>
+<etiq:field name="PartNo" source="epicor" from="LotInfo" column="JobHead_PartNum"/>
+<etiq:field name="PartDesc" source="epicor" from="LotInfo" column="JobHead_PartDescription"/>
+```
+
+- `connection` NAMES a machine-side connection (the designer's
+  File → Connections… store) — credentials and URLs never appear in the
+  template. A connection may define several **datasets** (Epicor calls
+  them environments; for a database it would be the database name):
+  which one is live is a machine or per-session choice, never a template
+  edit — unless `dataset=` here pins one explicitly.
+- `baq` is the BAQ id. `param-Xxx` values feed BAQ **parameters** (the
+  name must match a parameter defined in the BAQ); `filter-Xxx` become
+  OData `$filter` equality terms (the name must be a result column —
+  alias-prefixed). A value of `{FieldName}` resolves that field first
+  (prompts, lists, even another source); anything else is a literal.
+- One HTTP call per source per label, first row wins. A source whose
+  field-fed values are still empty (or mid-entry) does not fetch.
+- Validation: sources need `name`/`connection`/`baq`; `from=` must name a
+  declared source; `{Field}` references must exist and must not create a
+  cycle; a source with no params/filters warns (it would pull the whole
+  BAQ).
+
+## Data-panel presentation (etiq:panel)
+
+Optional, one per template — configures the print-station / Data-mode
+form without touching the fields themselves:
+
+```xml
+<etiq:panel print="direct" printer="embedded" copies="embedded"
+            collate="grouped" buttons="print,clear" buttons-at="top"/>
+```
+
+- `print` — `dialog` (system print dialog; default) | `direct`
+  (straight to the printer, labelprint-style).
+- `printer` — direct printing only: absent = machine default; a name =
+  pinned; `embedded` = an on-form picker with a "Default printer"
+  checkmark.
+- `copies` — `ask` (dialog on batch; default) | `embedded` (count
+  control on the form; collation control grays out at 1 copy) |
+  `fixed:N`.
+- `collate` — `choose` (selector on the form; enabled only when a run
+  can actually yield more than one page at 1 copy AND copies > 1) |
+  `grouped` (1-1-2-2) | `sequenced` (1-2-1-2) | `ask` (no selector — a
+  popup asks only when it matters).
+- `order` — explicit input order on the panel: comma list of
+  `field:Name` / `list:Name` tokens; unlisted inputs follow in
+  declaration order. (Edited with Move Up/Down on F4's Panel tab.)
+- `buttons` — comma list of `preview`, `print`, `printall`, `clear`
+  (default: all), in display order; `buttons-at` = `bottom` (default) |
+  `top`.
+- Individual inputs opt out with `panel="hide"` on the field or list —
+  the field still resolves; it just takes no operator input.
+
+Absent element/attributes reproduce the historical behavior exactly.
 
 ## Composed fields (segment lists)
 

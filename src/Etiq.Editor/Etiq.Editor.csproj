@@ -10,7 +10,7 @@
     <AssemblyName>etiqedit</AssemblyName>
     <!-- bump per release; Check for Updates compares this against the
          latest GitHub release tag (vX.Y.Z) -->
-    <Version>0.6.0</Version>
+    <Version>0.7.0</Version>
     <!-- lets the shell compile-check on non-Windows build agents;
          harmless on Windows -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>

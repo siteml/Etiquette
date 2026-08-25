@@ -26,7 +26,7 @@ apart:
   merge data into the template, generate barcodes, print via any Windows
   printer driver — plus a ZPL raster path for thermal printers.
 
-## What it does today (v0.6)
+## What it does today (v0.7)
 
 - **Barcodes, dependency-free:** Code 128, GS1-128, Code 39 (+extended),
   ITF-14, QR (versions 1–40, all ECC levels), rMQR, Aztec, DataMatrix
@@ -38,8 +38,17 @@ apart:
   lists, composition (with conditional variants — e.g. international
   address ordering), lookup maps, serial counters, dates, and REST
   sources. One resolver, used everywhere.
-- **Print station:** a data-entry mode with searchable pickers, live
-  preview, single/batch printing with collation control.
+- **Live ERP data, credentials kept out of templates:** declare Epicor
+  BAQ sources in the template by connection NAME; machines hold the
+  actual credentials DPAPI-protected, with named datasets
+  (production/pilot/…) switchable per machine or session and a
+  password-protected bundle for provisioning new stations.
+- **Print station:** a dedicated locked mode for shop-floor stations —
+  data entry + live preview + print, persisted across restarts — with a
+  per-template configurable panel (which inputs and buttons appear and
+  in what order; copies, collation, and printer selection on the form;
+  direct printing with no dialog) plus single/batch printing with
+  collation control.
 - **Reusable metadata templates (snippets):** ship-with defaults include a
   US address block and a country-aware international address block
   (~35 countries), plus save-your-own.

@@ -1,5 +1,37 @@
 namespace Etiq.Editor;
 
+/// <summary>Shared UI helpers.</summary>
+internal static class Ui
+{
+    /// <summary>Scale factor of this control's EFFECTIVE font relative to
+    /// the baseline the layout was authored against (Segoe UI 9pt at
+    /// 96 DPI, Font.Height = 15px). Font.Height is measured in device
+    /// pixels, so this captures BOTH display scaling (125/150%) and an
+    /// enlarged system font in one number.</summary>
+    public static float Factor(Control c) => c.Font.Height / 15f;
+
+    /// <summary>DPI/system-font scaling for hand-built containers. The
+    /// built-in WinForms auto-scale pipeline (AutoScaleMode.Font +
+    /// AutoScaleDimensions) proved unreliable for forms composed in code —
+    /// at 150% the text grew but the controls did not. So scale
+    /// EXPLICITLY: once the handle exists (the true DPI is known and all
+    /// children are present), multiply every bound by Factor().
+    /// AutoScaleMode is forced to None so the framework can never
+    /// double-scale on machines where its own pass does fire.</summary>
+    public static void AutoScale(ContainerControl c)
+    {
+        c.AutoScaleMode = AutoScaleMode.None;
+        bool done = false;
+        c.HandleCreated += (_, _) =>
+        {
+            if (done) return;
+            done = true;
+            float f = Factor(c);
+            if (f > 1.01f) c.Scale(new SizeF(f, f));
+        };
+    }
+}
+
 /// <summary>Tiny shared modal prompts (used by MainForm and the canvas
 /// context menu).</summary>
 internal static class Prompts
@@ -15,6 +47,7 @@ internal static class Prompts
             StartPosition = FormStartPosition.CenterParent,
             ClientSize = new Size(360, boxH + 64),
         };
+        Ui.AutoScale(dlg);
         var tb = new TextBox
         {
             Left = 12, Top = 12, Width = 336, Height = boxH, Text = initial,

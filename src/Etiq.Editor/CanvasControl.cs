@@ -807,6 +807,19 @@ public sealed class CanvasControl : Control
                 e.SuppressKeyPress = true;
             }
         };
+        // the overlay must track its content BOTH ways — grow when a line is
+        // added, shrink back when it's removed — floored at a usable minimum,
+        // not at the initial size. (The committed element's bounds follow the
+        // model on their own; this is purely the edit-time overlay.)
+        void Autosize()
+        {
+            var sz = TextRenderer.MeasureText(
+                tb.Text.Length == 0 ? " " : tb.Text, tb.Font);
+            tb.Width = Math.Max(80, sz.Width + 16);
+            tb.Height = Math.Max(26, sz.Height + 10);
+        }
+        tb.TextChanged += (_, _) => Autosize();
+        Autosize();
         tb.LostFocus += (_, _) => EndInlineEdit(commit: true);
         _inlineEdit = tb;
         _inlineTarget = o;

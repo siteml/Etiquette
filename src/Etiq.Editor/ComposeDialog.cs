@@ -49,6 +49,7 @@ public sealed class ComposeDialog : Form
         MinimizeBox = MaximizeBox = false;
         ShowInTaskbar = false;
         FormBorderStyle = FormBorderStyle.Sizable;
+        Ui.AutoScale(this);
         ClientSize = new Size(960, 480);
         MinimumSize = new Size(640, 360);
 

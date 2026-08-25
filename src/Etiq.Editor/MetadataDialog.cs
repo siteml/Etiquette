@@ -57,7 +57,29 @@ public sealed class MetadataDialog : Form
     private readonly ListBox _colList = new() { Width = 220, Height = 86 };
     private readonly DataGridView _rowGrid = GridTools.NewGrid();
 
-    private XElement? _curMap, _curList;   // elements the grids currently show
+    // sources tab (declared remote fetches — one BAQ row per label)
+    private readonly ListBox _srcList = new() { Dock = DockStyle.Fill };
+    private readonly TextBox _srcName = new() { Width = 160 };
+    private readonly TextBox _srcConn = new() { Width = 160 };
+    private readonly TextBox _srcDataset = new() { Width = 160 };
+    private readonly TextBox _srcBaq = new() { Width = 240 };
+    private readonly DataGridView _srcArgGrid = GridTools.NewGrid();
+
+    // panel tab (data-mode presentation)
+    private readonly ComboBox _pnPrint = new() { Width = 200, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ComboBox _pnPrinter = new() { Width = 200, DropDownStyle = ComboBoxStyle.DropDown };
+    private readonly ComboBox _pnCopies = new() { Width = 200, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly NumericUpDown _pnFixed = new() { Width = 70, Minimum = 1, Maximum = 999, Value = 1, Visible = false };
+    private readonly ComboBox _pnCollate = new() { Width = 200, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly CheckBox _pnBtnPreview = new() { Text = "Refresh Preview", AutoSize = true, Checked = true };
+    private readonly CheckBox _pnBtnPrint = new() { Text = "Print", AutoSize = true, Checked = true };
+    private readonly CheckBox _pnBtnPrintAll = new() { Text = "Print All", AutoSize = true, Checked = true };
+    private readonly CheckBox _pnBtnClear = new() { Text = "Clear", AutoSize = true, Checked = true };
+    private readonly ComboBox _pnButtonsAt = new() { Width = 200, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly CheckedListBox _pnInputs = new() { Width = 300, Height = 170, CheckOnClick = true };
+    private List<string> _pnNaturalOrder = new();   // tokens in declaration order
+
+    private XElement? _curMap, _curList, _curSrc;   // elements the grids currently show
 
     public MetadataDialog(EditorDoc doc, Action<XElement>? apply = null)
     {
@@ -70,12 +92,15 @@ public sealed class MetadataDialog : Form
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = MaximizeBox = false;
         ShowInTaskbar = false;
+        Ui.AutoScale(this);
         ClientSize = new Size(800, 560);
 
         var tabs = new TabControl { Dock = DockStyle.Fill };
         tabs.TabPages.Add(BuildFieldsTab());
         tabs.TabPages.Add(BuildMapsTab());
         tabs.TabPages.Add(BuildListsTab());
+        tabs.TabPages.Add(BuildSourcesTab());
+        tabs.TabPages.Add(BuildPanelTab());
 
         var bottom = new FlowLayoutPanel
         {
@@ -572,6 +597,301 @@ public sealed class MetadataDialog : Form
         refresh();
     }
 
+    // ---------- sources ----------
+
+    private TabPage BuildSourcesTab()
+    {
+        var page = new TabPage("Sources");
+        _srcArgGrid.Columns.Add(NewComboCol("Kind", "param", "filter"));
+        _srcArgGrid.Columns.Add("Name", "Name");
+        _srcArgGrid.Columns.Add("Value", "Value");
+
+        var right = new Panel { Dock = DockStyle.Fill };
+        void Row(int top, string label, TextBox tb)
+        {
+            right.Controls.Add(new Label
+                { Text = label, Left = 6, Top = top + 3, AutoSize = true });
+            tb.Left = 116; tb.Top = top;
+            right.Controls.Add(tb);
+        }
+        Row(8, "Name", _srcName);
+        Row(38, "Connection", _srcConn);
+        Row(68, "Dataset pin", _srcDataset);
+        Row(98, "BAQ", _srcBaq);
+        var hint = new Label
+        {
+            Text = "Params/filters — Value is a literal, or {FieldName} to feed a field's " +
+                   "resolved value in. Fields consume this source via From + Column.",
+            Left = 6, Top = 128, AutoSize = false, Height = 34,
+            ForeColor = SystemColors.GrayText,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+        };
+        right.Controls.Add(hint);
+        _srcArgGrid.Dock = DockStyle.None;   // NewGrid() docks Fill — here it's positioned
+        right.Controls.Add(_srcArgGrid);
+        right.Resize += (_, _) =>
+        {
+            hint.Width = right.Width - 12;
+            _srcArgGrid.SetBounds(6, 166, right.Width - 12, right.Height - 172);
+        };
+
+        page.Controls.Add(SplitPage(_srcList, right,
+            ("Add", (Action)AddSource),
+            ("Remove", (Action)(() => { RemoveSelected(_srcList, RefreshSourceList); LoadSource(); }))));
+        _srcList.SelectedIndexChanged += (_, _) => { CommitSource(); LoadSource(); };
+        _srcList.Format += (_, e) =>
+        {
+            if (e.ListItem is XElement el)
+                e.Value = $"{(string?)el.Attribute("name") ?? "(unnamed)"}  [{(string?)el.Attribute("connection") ?? "?"}]";
+        };
+        _srcList.FormattingEnabled = true;
+        RefreshSourceList();
+        if (_srcList.Items.Count > 0) _srcList.SelectedIndex = 0; else LoadSource();
+        return page;
+    }
+
+    private void AddSource()
+    {
+        CommitSource();
+        var el = new XElement(NS + "source",
+            new XAttribute("name", UniqueName("Source", "source")),
+            new XAttribute("connection", ""));
+        Result.Add(el);
+        RefreshSourceList();
+        _srcList.SelectedItem = el;
+    }
+
+    private void RefreshSourceList()
+    {
+        _srcList.Items.Clear();
+        foreach (var el in Result.Elements(NS + "source")) _srcList.Items.Add(el);
+    }
+
+    private void LoadSource()
+    {
+        _curSrc = _srcList.SelectedItem as XElement;
+        _srcName.Text = (string?)_curSrc?.Attribute("name") ?? "";
+        _srcConn.Text = (string?)_curSrc?.Attribute("connection") ?? "";
+        _srcDataset.Text = (string?)_curSrc?.Attribute("dataset") ?? "";
+        _srcBaq.Text = (string?)_curSrc?.Attribute("baq") ?? "";
+        _srcArgGrid.Rows.Clear();
+        bool en = _curSrc is not null;
+        _srcName.Enabled = _srcConn.Enabled = _srcDataset.Enabled =
+            _srcBaq.Enabled = _srcArgGrid.Enabled = en;
+        if (_curSrc is null) return;
+        foreach (var a in _curSrc.Attributes())
+        {
+            string n = a.Name.LocalName;
+            if (n.StartsWith("param-")) _srcArgGrid.Rows.Add("param", n["param-".Length..], a.Value);
+            else if (n.StartsWith("filter-")) _srcArgGrid.Rows.Add("filter", n["filter-".Length..], a.Value);
+        }
+    }
+
+    private void CommitSource()
+    {
+        if (_curSrc is null) return;
+        _curSrc.SetAttributeValue("name", _srcName.Text.Trim());
+        _curSrc.SetAttributeValue("connection", _srcConn.Text.Trim());
+        _curSrc.SetAttributeValue("dataset",
+            _srcDataset.Text.Trim() is { Length: > 0 } ds ? ds : null);
+        _curSrc.SetAttributeValue("baq",
+            _srcBaq.Text.Trim() is { Length: > 0 } bq ? bq : null);
+        // rebuild the prefixed attribute pairs from the grid
+        foreach (var a in _curSrc.Attributes().Where(a =>
+                     a.Name.LocalName.StartsWith("param-") ||
+                     a.Name.LocalName.StartsWith("filter-")).ToList())
+            a.Remove();
+        foreach (DataGridViewRow r in _srcArgGrid.Rows)
+        {
+            if (r.IsNewRow) continue;
+            string kind = r.Cells[0].Value?.ToString() ?? "param";
+            string nm = r.Cells[1].Value?.ToString()?.Trim() ?? "";
+            if (nm == "") continue;
+            _curSrc.SetAttributeValue($"{kind}-{nm}", r.Cells[2].Value?.ToString() ?? "");
+        }
+    }
+
+    // ---------- panel (data-mode presentation) ----------
+
+    private TabPage BuildPanelTab()
+    {
+        var page = new TabPage("Panel");
+        var p = new Panel { Dock = DockStyle.Fill };
+        int y = 12;
+        void Row(string label, Control c, int extra = 0)
+        {
+            p.Controls.Add(new Label { Text = label, Left = 10, Top = y + 3, AutoSize = true });
+            c.Left = 150; c.Top = y;
+            p.Controls.Add(c);
+            y += 32 + extra;
+        }
+        _pnPrint.Items.AddRange(new object[]
+            { "dialog (system print dialog)", "direct (straight to printer)" });
+        Row("Print behavior", _pnPrint);
+        _pnPrinter.Items.AddRange(new object[] { "(machine default)", "(embedded picker)" });
+        try
+        {
+            foreach (string pr in System.Drawing.Printing.PrinterSettings.InstalledPrinters)
+                _pnPrinter.Items.Add(pr);
+        }
+        catch { /* spooler trouble */ }
+        Row("Printer (direct)", _pnPrinter);
+        _pnCopies.Items.AddRange(new object[]
+            { "ask (dialog on batch)", "embedded (on the form)", "fixed" });
+        Row("Copies", _pnCopies);
+        _pnFixed.Left = 360; _pnFixed.Top = _pnCopies.Top; p.Controls.Add(_pnFixed);
+        _pnCopies.SelectedIndexChanged += (_, _) => _pnFixed.Visible = _pnCopies.SelectedIndex == 2;
+        _pnCollate.Items.AddRange(new object[]
+            { "choose (on the form/dialog)", "grouped (1-1-2-2)", "sequenced (1-2-1-2)",
+              "ask (no selector; popup only when it matters)" });
+        Row("Collation", _pnCollate);
+        var btns = new FlowLayoutPanel { Left = 150, Top = y, Width = 480, Height = 28 };
+        btns.Controls.AddRange(new Control[] { _pnBtnPreview, _pnBtnPrint, _pnBtnPrintAll, _pnBtnClear });
+        p.Controls.Add(new Label { Text = "Buttons", Left = 10, Top = y + 3, AutoSize = true });
+        p.Controls.Add(btns);
+        y += 34;
+        _pnButtonsAt.Items.AddRange(new object[] { "bottom (after the fields)", "top" });
+        Row("Buttons placement", _pnButtonsAt);
+        p.Controls.Add(new Label
+        {
+            Text = "Inputs shown on the data panel (unchecked = panel=\"hide\" — the field still resolves):",
+            Left = 10, Top = y + 4, AutoSize = true,
+        });
+        _pnInputs.Left = 10; _pnInputs.Top = y + 26;
+        p.Controls.Add(_pnInputs);
+        // reorder: the panel shows inputs in THIS order (etiq:panel order=)
+        var up = new Button { Text = "Move Up", Left = 320, Top = y + 26, Width = 90 };
+        var down = new Button { Text = "Move Down", Left = 320, Top = y + 56, Width = 90 };
+        void Move(int dir)
+        {
+            int i = _pnInputs.SelectedIndex, j = i + dir;
+            if (i < 0 || j < 0 || j >= _pnInputs.Items.Count) return;
+            var item = _pnInputs.Items[i]; bool chk = _pnInputs.GetItemChecked(i);
+            var other = _pnInputs.Items[j]; bool ochk = _pnInputs.GetItemChecked(j);
+            _pnInputs.Items[j] = item; _pnInputs.SetItemChecked(j, chk);
+            _pnInputs.Items[i] = other; _pnInputs.SetItemChecked(i, ochk);
+            _pnInputs.SelectedIndex = j;
+        }
+        up.Click += (_, _) => Move(-1);
+        down.Click += (_, _) => Move(+1);
+        p.Controls.Add(up); p.Controls.Add(down);
+        page.Controls.Add(p);
+        LoadPanel();
+        return page;
+    }
+
+    private void LoadPanel()
+    {
+        var el = Result.Element(NS + "panel");
+        string? A(string n) => el is null ? null : (string?)el.Attribute(n);
+        _pnPrint.SelectedIndex = A("print") == "direct" ? 1 : 0;
+        string? printer = A("printer");
+        _pnPrinter.Text = printer switch
+        {
+            null => "(machine default)",
+            "embedded" => "(embedded picker)",
+            _ => printer,
+        };
+        string copies = A("copies") ?? "ask";
+        _pnCopies.SelectedIndex = copies == "embedded" ? 1 : copies.StartsWith("fixed:") ? 2 : 0;
+        if (copies.StartsWith("fixed:") && int.TryParse(copies["fixed:".Length..], out int n) && n > 0)
+            { _pnFixed.Value = n; _pnFixed.Visible = true; }
+        _pnCollate.SelectedIndex = (A("collate") ?? "choose") switch
+            { "grouped" => 1, "sequenced" => 2, "ask" => 3, _ => 0 };
+        var btns = (A("buttons") ?? "preview,print,printall,clear")
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        _pnBtnPreview.Checked = btns.Contains("preview");
+        _pnBtnPrint.Checked = btns.Contains("print");
+        _pnBtnPrintAll.Checked = btns.Contains("printall");
+        _pnBtnClear.Checked = btns.Contains("clear");
+        _pnButtonsAt.SelectedIndex = A("buttons-at") == "top" ? 1 : 0;
+
+        _pnInputs.Items.Clear();
+        var entries = new List<(string Text, bool Show)>();
+        foreach (var f in Result.Elements(NS + "field"))
+        {
+            string src = (string?)f.Attribute("source") ?? "";
+            bool input = src == "prompt" ||
+                         (src == "epicor" && (string?)f.Attribute("override") == "true");
+            if (!input) continue;
+            entries.Add(($"field: {(string?)f.Attribute("name")}",
+                (string?)f.Attribute("panel") != "hide"));
+        }
+        foreach (var l in Result.Elements(NS + "list"))
+            entries.Add(($"list: {(string?)l.Attribute("name")}",
+                (string?)l.Attribute("panel") != "hide"));
+        _pnNaturalOrder = entries.Select(e => e.Text.Replace(": ", ":")).ToList();
+        var saved = (A("order") ?? "")
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (saved.Length > 0)
+            entries = entries.OrderBy(e =>
+            {
+                int idx = Array.IndexOf(saved, e.Text.Replace(": ", ":"));
+                return idx < 0 ? int.MaxValue : idx;
+            }).ToList();
+        foreach (var (text, show) in entries)
+            _pnInputs.Items.Add(text, show);
+    }
+
+    private void CommitPanel()
+    {
+        // element carries only non-default values; all-defaults = no element
+        var el = Result.Element(NS + "panel");
+        string? print = _pnPrint.SelectedIndex == 1 ? "direct" : null;
+        string? printer = _pnPrinter.Text switch
+        {
+            "(machine default)" or "" => null,
+            "(embedded picker)" => "embedded",
+            var t => t.Trim(),
+        };
+        string? copies = _pnCopies.SelectedIndex switch
+        {
+            1 => "embedded", 2 => $"fixed:{(int)_pnFixed.Value}", _ => null,
+        };
+        string? collate = _pnCollate.SelectedIndex switch
+            { 1 => "grouped", 2 => "sequenced", 3 => "ask", _ => null };
+        var picked = new List<string>();
+        if (_pnBtnPreview.Checked) picked.Add("preview");
+        if (_pnBtnPrint.Checked) picked.Add("print");
+        if (_pnBtnPrintAll.Checked) picked.Add("printall");
+        if (_pnBtnClear.Checked) picked.Add("clear");
+        string? buttons = picked.Count == 4 ? null : string.Join(",", picked);
+        string? at = _pnButtonsAt.SelectedIndex == 1 ? "top" : null;
+        var tokens = _pnInputs.Items.Cast<string>()
+            .Select(t => t.Replace(": ", ":")).ToList();
+        string? order = tokens.SequenceEqual(_pnNaturalOrder)
+            ? null : string.Join(",", tokens);   // declaration order = no attr
+
+        bool any = print is not null || printer is not null || copies is not null ||
+                   collate is not null || buttons is not null || at is not null ||
+                   order is not null;
+        if (!any) { el?.Remove(); }
+        else
+        {
+            if (el is null) { el = new XElement(NS + "panel"); Result.Add(el); }
+            el.SetAttributeValue("print", print);
+            el.SetAttributeValue("printer", printer);
+            el.SetAttributeValue("copies", copies);
+            el.SetAttributeValue("collate", collate);
+            el.SetAttributeValue("buttons", buttons);
+            el.SetAttributeValue("buttons-at", at);
+            el.SetAttributeValue("order", order);
+        }
+
+        // input visibility → panel="hide" on the named field/list
+        foreach (var item in _pnInputs.Items.Cast<string>()
+                     .Select((text, i) => (text, hide: !_pnInputs.GetItemChecked(i))))
+        {
+            int sep = item.text.IndexOf(": ");
+            if (sep < 0) continue;
+            string kind = item.text[..sep] == "field" ? "field" : "list";
+            string name = item.text[(sep + 2)..];
+            var target = Result.Elements(NS + kind)
+                .FirstOrDefault(e => (string?)e.Attribute("name") == name);
+            target?.SetAttributeValue("panel", item.hide ? "hide" : null);
+        }
+    }
+
     private string UniqueName(string stem, string kind)
     {
         var taken = Result.Elements(NS + kind)
@@ -585,6 +905,8 @@ public sealed class MetadataDialog : Form
         // compose segs commit inside ComposeDialog on its own OK
         CommitMap();
         CommitList();
+        CommitSource();
+        CommitPanel();
     }
 
     /// <summary>Push the current edits into the document WITHOUT closing —
@@ -611,12 +933,16 @@ public sealed class MetadataDialog : Form
         _curField = null;
         _curMap = null;
         _curList = null;
+        _curSrc = null;
         _fieldProps.SelectedObject = null;
         var fresh = new XElement(_appliedSnapshot);
         Result.ReplaceAll(fresh.Attributes().Cast<object>().Concat(fresh.Nodes()).ToArray());
         RefreshFieldList();
         RefreshMapList();
         RefreshListList();
+        RefreshSourceList();
+        LoadSource();
+        LoadPanel();
         LoadMap();
         LoadList();
         UpdateComposeUi();
@@ -768,6 +1094,16 @@ public sealed class FieldMetaProps
 
     [Category("Field"), Description("BAQ column (source=epicor) or list row column (source=list)")]
     public string Column { get => Get("column"); set => Set("column", value); }
+
+    [Category("Epicor"), Description("Declared etiq:source this field reads (source=epicor); empty = the engine's single implicit BAQ")]
+    public string From { get => Get("from"); set => Set("from", value); }
+
+    [Category("Epicor"), Description("Operator may type over the fetched value; empty entry = use the pull (source=epicor)")]
+    public bool Override
+    {
+        get => Get("override") == "true";
+        set => Set("override", value ? "true" : null);
+    }
 
     [Category("Serial"), Description("Counter name (source=serial)")]
     public string Counter { get => Get("counter"); set => Set("counter", value); }

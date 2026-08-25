@@ -107,6 +107,13 @@ public static class UpdateChecker
         catch { /* best-effort */ }
     }
 
+    /// <summary>Generic access to settings.json for other app settings
+    /// (e.g. the print-station template path). Null = absent/remove.</summary>
+    public static string? GetSetting(string key) =>
+        LoadSettings().TryGetValue(key, out var v) && v != "" ? v : null;
+
+    public static void SetSetting(string key, string? value) => SaveSetting(key, value);
+
     /// <summary>Update flavor preference: "auto" (default — match the
     /// running build, but a standalone install with the runtime present is
     /// OFFERED the lighter build) | "standalone" | "framework".</summary>
