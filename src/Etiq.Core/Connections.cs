@@ -24,7 +24,7 @@ namespace Etiq.Core;
 public sealed class ConnectionDef
 {
     public string Name { get; set; } = "";
-    /// <summary>epicor | rest | (future: db, ...) — decides which settings
+    /// <summary>epicor | glpi | rest | (future: db, ...) — decides which settings
     /// keys matter and which client consumes them.</summary>
     public string Type { get; set; } = "epicor";
     public Dictionary<string, string> Settings { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -81,6 +81,19 @@ public sealed class ConnectionDef
             ApiKey = s.GetValueOrDefault("apiKey", ""),
             Username = s.GetValueOrDefault("username", ""),
             Password = s.GetValueOrDefault("password", ""),
+        };
+    }
+
+    /// <summary>Build the GlpiClient config from resolved settings
+    /// (Type == "glpi"): baseUrl (…/apirest.php), appToken, userToken.</summary>
+    public GlpiConfig ToGlpiConfig(string? datasetName = null)
+    {
+        var s = Resolved(datasetName);
+        return new GlpiConfig
+        {
+            BaseUrl = s.GetValueOrDefault("baseUrl", ""),
+            AppToken = s.GetValueOrDefault("appToken", ""),
+            UserToken = s.GetValueOrDefault("userToken", ""),
         };
     }
 }

@@ -6,7 +6,7 @@ namespace Etiq.Editor;
 /// File > Connections… — manage this machine's named connections, their
 /// datasets, and the machine-default dataset. Secrets typed here are
 /// DPAPI-wrapped when the store is saved (they display as "dpapi:…"
-/// afterwards; retype to change). Export/Import moves the whole store
+/// afterwards; retype to change). Export picks which connections travel; Import merges
 /// between machines as a password-protected *.etiqcreds bundle.
 /// </summary>
 public sealed class ConnectionsDialog : Form
@@ -29,20 +29,26 @@ public sealed class ConnectionsDialog : Form
     /// users see what to fill instead of guessing.</summary>
     private static readonly string[] EpicorKeys =
         { "baseUrl", "company", "apiKey", "username", "password" };
+    private static readonly string[] GlpiKeys =
+        { "baseUrl", "appToken", "userToken" };
     private static readonly string[] RestKeys =
         { "baseUrl", "kind", "username", "password" };
     private static string[] KeysFor(string type) =>
-        type.Equals("rest", StringComparison.OrdinalIgnoreCase) ? RestKeys : EpicorKeys;
+        type.Equals("rest", StringComparison.OrdinalIgnoreCase) ? RestKeys
+        : type.Equals("glpi", StringComparison.OrdinalIgnoreCase) ? GlpiKeys
+        : EpicorKeys;
 
     /// <summary>Shown as a cell tooltip so each setting explains itself.</summary>
     private static readonly Dictionary<string, string> KeyHints = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["baseUrl"] = "epicor: server root, e.g. https://host/EpicorERP (no /api/v2 — added automatically).\nrest: the API base URL",
+        ["baseUrl"] = "epicor: server root, e.g. https://host/EpicorERP (no /api/v2 — added automatically).\nglpi: the API endpoint, e.g. https://glpi.example.local/apirest.php\nrest: the API base URL",
         ["company"] = "Epicor Company ID (not its display name)",
         ["apiKey"] = "Epicor REST API key (sent as x-api-key). Stored protected.",
         ["username"] = "Service account user (basic auth). Prefer a dedicated account scoped to label BAQs.",
         ["password"] = "Stored protected — shows as dpapi:… after OK; retype to change.",
         ["kind"] = "rest auth kind: none | headers | basic | glpi",
+        ["appToken"] = "GLPI API client token (Setup > General > API > API clients). Stored protected.",
+        ["userToken"] = "GLPI personal API token of the service user (My settings > Remote access keys). Stored protected.",
     };
 
     public ConnectionsDialog()
@@ -69,7 +75,7 @@ public sealed class ConnectionsDialog : Form
         // ----- right: type, base settings, datasets -----
         int rx = 205;
         Controls.Add(new Label { Text = "Type:", Left = rx, Top = 14, AutoSize = true });
-        _type.Items.AddRange(new object[] { "epicor", "rest" });
+        _type.Items.AddRange(new object[] { "epicor", "glpi", "rest" });
         _type.Left = rx + 55; _type.Top = 10; Controls.Add(_type);
         Controls.Add(new Label
         {
@@ -198,7 +204,8 @@ public sealed class ConnectionsDialog : Form
     /// <summary>Round-trip check against the machine the CURRENT grid
     /// values describe (uncommitted edits included), using the connection's
     /// default dataset. epicor: GET the OData service root with the same
-    /// auth the BAQ fetches use; rest: GET the base URL.</summary>
+    /// auth the BAQ fetches use; glpi: initSession + killSession (the real
+    /// auth dance); rest: GET the base URL.</summary>
     private async Task TestCurrentAsync(Button btn)
     {
         if (_cur is null) return;
@@ -210,6 +217,25 @@ public sealed class ConnectionsDialog : Form
             try
             {
                 var st = _cur.Resolved(_cur.DefaultDataset);
+                if (_cur.Type.Equals("glpi", StringComparison.OrdinalIgnoreCase))
+                {
+                    using var g = new GlpiClient(_cur.ToGlpiConfig(_cur.DefaultDataset));
+                    try
+                    {
+                        await g.InitSessionAsync();
+                        await g.KillSessionAsync();   // async here — never block the UI thread
+                        report = "OK — session opened and closed (App-Token + user token accepted).";
+                    }
+                    catch (GlpiException gx)
+                    {
+                        report = gx.Message.Contains("HTTP 401") ? "Reached the server, but authentication FAILED (401) — check appToken/userToken (and that the API + the user's token are enabled)."
+                               : gx.Message.Contains("HTTP 400") ? "Server rejected initSession (400) — usually a missing/invalid App-Token, or the API client's IP range excludes this machine."
+                               : gx.Message.Contains("HTTP 404") ? "Server reached but path not found (404) — baseUrl should end in /apirest.php."
+                               : "Failed: " + gx.Message;
+                    }
+                    MessageBox.Show(this, report, $"Test — {_cur.Name}");
+                    return;
+                }
                 using var http = new System.Net.Http.HttpClient
                     { Timeout = TimeSpan.FromSeconds(10) };
                 string url;
@@ -453,18 +479,60 @@ public sealed class ConnectionsDialog : Form
     {
         CommitCurrent();
         if (_list.Count == 0) { MessageBox.Show(this, "Nothing to export.", "Export"); return; }
+        // pick WHICH connections travel: a station that only prints GLPI
+        // tags must never receive the ERP credentials
+        var chosen = PickConnections(_list, _cur);
+        if (chosen is null || chosen.Count == 0) return;
         using var dlg = new SaveFileDialog
-            { Filter = "Etiquette connections bundle (*.etiqcreds)|*.etiqcreds", FileName = "connections.etiqcreds" };
+        {
+            Filter = "Etiquette connections bundle (*.etiqcreds)|*.etiqcreds",
+            FileName = chosen.Count == 1 ? $"{chosen[0].Name}.etiqcreds" : "connections.etiqcreds",
+        };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         string? pw = AskPassword(this, "Bundle password (share it out-of-band)", confirm: true);
         if (pw is null) return;
         try
         {
-            File.WriteAllBytes(dlg.FileName, CredsBundle.Export(_list, pw));
-            MessageBox.Show(this, "Bundle exported. Deliver the password separately " +
-                "(never alongside the file).", "Export");
+            File.WriteAllBytes(dlg.FileName, CredsBundle.Export(chosen, pw));
+            MessageBox.Show(this, $"Bundle exported ({chosen.Count} connection(s)). Deliver the password " +
+                "separately (never alongside the file).", "Export");
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed"); }
+    }
+
+    /// <summary>Checkbox list of connections to include; the current one is
+    /// pre-ticked, the rest not (least privilege by default). Null = cancel.</summary>
+    private List<ConnectionDef>? PickConnections(List<ConnectionDef> all, ConnectionDef? current)
+    {
+        using var f = new Form
+        {
+            Text = "Export which connections?", ClientSize = new Size(340, 90 + Math.Min(all.Count, 10) * 22),
+            FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+        };
+        Ui.AutoScale(f);
+        var box = new CheckedListBox
+        {
+            Left = 12, Top = 12, Width = 316, Height = Math.Min(all.Count, 10) * 22 + 8,
+            CheckOnClick = true, IntegralHeight = false,
+        };
+        foreach (var c in all)
+            box.Items.Add($"{c.Name}  [{c.Type}]", ReferenceEquals(c, current) || (current is null && all.Count == 1));
+        var all_ = new Button { Text = "All", Left = 12, Top = box.Bottom + 10, Width = 60 };
+        var none = new Button { Text = "None", Left = 78, Top = box.Bottom + 10, Width = 60 };
+        var ok = new Button { Text = "Export", DialogResult = DialogResult.OK, Left = 164, Top = box.Bottom + 10, Width = 80 };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 250, Top = box.Bottom + 10, Width = 78 };
+        all_.Click += (_, _) => { for (int i = 0; i < box.Items.Count; i++) box.SetItemChecked(i, true); };
+        none.Click += (_, _) => { for (int i = 0; i < box.Items.Count; i++) box.SetItemChecked(i, false); };
+        f.Controls.AddRange(new Control[] { box, all_, none, ok, cancel });
+        f.AcceptButton = ok; f.CancelButton = cancel;
+        f.ClientSize = new Size(340, cancel.Bottom + 12);
+        if (f.ShowDialog(this) != DialogResult.OK) return null;
+        var chosen = new List<ConnectionDef>();
+        for (int i = 0; i < all.Count; i++)
+            if (box.GetItemChecked(i)) chosen.Add(all[i]);
+        if (chosen.Count == 0) MessageBox.Show(this, "Nothing selected.", "Export");
+        return chosen;
     }
 
     private void Import()

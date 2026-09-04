@@ -121,6 +121,45 @@ public sealed class EpicorClient : IDisposable
         return row;
     }
 
+    /// <summary>ALL rows of a BAQ (for a query-fed pick list). Unlike
+    /// FetchSourceRowAsync this permits an unconstrained call — listing the
+    /// whole set is the point — capped at <paramref name="max"/> rows via
+    /// $top.</summary>
+    public async Task<List<Dictionary<string, JsonElement>>> FetchSourceRowsAsync(
+        string baq,
+        IReadOnlyDictionary<string, string> parameters,
+        IReadOnlyDictionary<string, string> filters,
+        int max = 2000,
+        CancellationToken ct = default)
+    {
+        var terms = new List<string>();
+        foreach (var (k, v) in parameters)
+            terms.Add($"{Uri.EscapeDataString(k)}={Uri.EscapeDataString(v)}");
+        var fparts = filters.Where(f => !string.IsNullOrWhiteSpace(f.Value))
+            .Select(f => $"{f.Key} eq '{f.Value.Replace("'", "''")}'").ToList();
+        if (fparts.Count > 0)
+            terms.Add("$filter=" + Uri.EscapeDataString(string.Join(" and ", fparts)));
+        terms.Add($"$top={max}");
+        string url = $"{Base}/api/v2/odata/{Uri.EscapeDataString(_cfg.Company)}/BaqSvc/{Uri.EscapeDataString(baq)}/Data"
+                     + "?" + string.Join("&", terms);
+        using var resp = await _http.GetAsync(url, ct);
+        string body = await ReadCappedAsync(resp, ct);
+        if ((int)resp.StatusCode != 200)
+            throw new EpicorException(
+                $"BAQ '{baq}' returned HTTP {(int)resp.StatusCode} for {url}: {Trim(body, 300)}");
+        using var doc = JsonDocument.Parse(body);
+        if (!doc.RootElement.TryGetProperty("value", out var value) || value.ValueKind != JsonValueKind.Array)
+            throw new EpicorException($"BAQ '{baq}': response has no value array");
+        var rows = new List<Dictionary<string, JsonElement>>();
+        foreach (var item in value.EnumerateArray())
+        {
+            var row = new Dictionary<string, JsonElement>();
+            foreach (var p in item.EnumerateObject()) row[p.Name] = p.Value.Clone();
+            rows.Add(row);
+        }
+        return rows;
+    }
+
     private string BuildFilter(string job)
     {
         if (!_cfg.FieldMap.TryGetValue("JobNum", out var col) || col == "")

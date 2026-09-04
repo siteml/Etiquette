@@ -477,6 +477,35 @@ Check("resolver: field case= is opt-in, normalizes, validator gates enum", () =>
         f => f.Code == "field-case" && f.Severity == Severity.Error), "bad enum rejected");
 });
 
+Check("resolver: seg split/part picks a delimited piece; validator gates it", () =>
+{
+    var t = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:field name="Path" source="prompt"/>
+            <etiq:field name="Loc" source="compose">
+              <etiq:seg ref="Path" split=" &gt; " part="-2"/>
+              <etiq:seg ref="Path" split=" &gt; " part="-1" sep=" - "/>
+            </etiq:field>
+            <etiq:field name="First" source="compose"><etiq:seg ref="Path" split=" &gt; " part="0" case="upper"/></etiq:field>
+            <etiq:field name="Gone" source="compose"><etiq:seg ref="Path" split=" &gt; " part="5"/></etiq:field>
+            <etiq:field name="Bad" source="compose"><etiq:seg ref="Path" part="1"/></etiq:field>
+          </etiq:label></metadata>
+          <text x="8" y="20" data-field="Loc">x</text>
+          <text x="8" y="40" data-field="First">x</text>
+          <text x="8" y="60" data-field="Gone">x</text>
+          <text x="8" y="80" data-field="Bad">x</text>
+        </svg>
+        """);
+    var r = new FieldResolver(t, new ResolveContext { PromptValues = new() { ["Path"] = "Site > Bldg A > Room 12" } });
+    AssertEq("Bldg A - Room 12", r.Resolve("Loc"), "parent - leaf");
+    AssertEq("SITE", r.Resolve("First"), "first piece + case");
+    AssertEq("", r.Resolve("Gone"), "out of range = empty");
+    var one = new FieldResolver(t, new ResolveContext { PromptValues = new() { ["Path"] = "Front Office" } });
+    AssertEq("Front Office", one.Resolve("Loc"), "one level: no dangling separator");
+    Assert(TemplateValidator.Validate(t).Any(f => f.Code == "seg-split"), "part without split flagged");
+});
+
 Check("resolver: transform order + number/date formats", () =>
 {
     var t = EtiqTemplate.Parse("""
@@ -1695,6 +1724,246 @@ Check("RestClient plugs into FieldResolver as the rest provider", () =>
         Rest = (conn, q, pick) => conn == "glpi" ? client.Fetch(q, pick) : null,
     });
     AssertEq("PC-042", r.Resolve("Asset"), "end to end");
+});
+
+Check("GlpiClient: session dance, param-id fetch, expand_dropdowns, killSession", () =>
+{
+    var seen = new List<string>();
+    var handler = new MockHandler(req =>
+    {
+        seen.Add(req.RequestUri!.PathAndQuery);
+        Assert(req.Headers.TryGetValues("App-Token", out var a) && a.First() == "APP", "app token on every call");
+        AssertEq("application/json", req.Content?.Headers.ContentType?.MediaType!, "GLPI wants Content-Type on every call, GET included");
+        if (req.RequestUri.AbsolutePath.EndsWith("/initSession"))
+        {
+            Assert(req.Headers.TryGetValues("Authorization", out var u) && u.First() == "user_token USR", "user token");
+            return Json("""{"session_token":"SESS-9"}""");
+        }
+        Assert(req.Headers.TryGetValues("Session-Token", out var st) && st.First() == "SESS-9", "session header");
+        if (req.RequestUri.AbsolutePath.EndsWith("/killSession")) return Json("true");
+        AssertEq("/apirest.php/Computer/42", req.RequestUri.AbsolutePath, "item path");
+        Assert(req.RequestUri.Query.Contains("expand_dropdowns=true"), "dropdowns expanded");
+        return Json("""{"id":42,"name":"PC-042","serial":"SN123","otherserial":"INV-7","locations_id":"Building A > Room 12"}""");
+    });
+    var cfg = new GlpiConfig { BaseUrl = "https://g/apirest.php/", AppToken = "APP", UserToken = "USR" };
+    var c = new GlpiClient(cfg, handler);
+    var row = c.FetchItemRowAsync("Computer",
+        new Dictionary<string, string> { ["id"] = "42" },
+        new Dictionary<string, string>()).GetAwaiter().GetResult();
+    AssertEq("PC-042", row["name"].GetString()!, "name");
+    AssertEq("Building A > Room 12", row["locations_id"].GetString()!, "expanded location");
+    AssertEq("INV-7", row["OtherSerial"].GetString()!, "column lookup is case-insensitive");
+    c.FetchItemRowAsync("Computer", new Dictionary<string, string> { ["id"] = "42" },
+        new Dictionary<string, string>()).GetAwaiter().GetResult();
+    c.Dispose();
+    AssertEq(1, seen.Count(p => p.EndsWith("/initSession")), "session cached across fetches");
+    AssertEq(1, seen.Count(p => p.EndsWith("/killSession")), "session released on dispose");
+});
+
+Check("GlpiClient: filter search narrows substring hits to exact, 206 accepted, guards", () =>
+{
+    var handler = new MockHandler(req =>
+    {
+        if (req.RequestUri!.AbsolutePath.EndsWith("/initSession")) return Json("""{"session_token":"S"}""");
+        if (req.RequestUri.AbsolutePath.EndsWith("/killSession")) return Json("true");
+        AssertEq("/apirest.php/Monitor", req.RequestUri.AbsolutePath, "list path");
+        string q = Uri.UnescapeDataString(req.RequestUri.Query);
+        Assert(q.Contains("searchText[serial]=SN1"), "searchText filter: " + q);
+        Assert(q.Contains("range=0-49"), "ranged");
+        return new HttpResponseMessage(HttpStatusCode.PartialContent)
+        {
+            Content = new StringContent("""[{"id":1,"serial":"SN10","name":"wrong"},{"id":2,"serial":"sn1","name":"right"}]""",
+                                        Encoding.UTF8, "application/json"),
+        };
+    });
+    var cfg = new GlpiConfig { BaseUrl = "https://g/apirest.php", AppToken = "A", UserToken = "U" };
+    using var c = new GlpiClient(cfg, handler);
+    var none = new Dictionary<string, string>();
+    var row = c.FetchItemRowAsync("Monitor", none, new Dictionary<string, string> { ["serial"] = "SN1" })
+        .GetAwaiter().GetResult();
+    AssertEq("right", row["name"].GetString()!, "exact (case-insensitive) match wins over substring hit");
+
+    try { c.FetchItemRowAsync("Monitor", none, new Dictionary<string, string> { ["serial"] = " " }).GetAwaiter().GetResult();
+          throw new Exception("empty filter accepted"); }
+    catch (GlpiException ex) { Assert(ex.Message.Contains("whole inventory"), "guard message"); }
+    try { c.FetchItemRowAsync("Monitor", new Dictionary<string, string> { ["serial"] = "x" }, none).GetAwaiter().GetResult();
+          throw new Exception("param-serial accepted"); }
+    catch (GlpiException ex) { Assert(ex.Message.Contains("param-id"), "only param-id"); }
+    try { c.FetchItemRowAsync("", none, new Dictionary<string, string> { ["serial"] = "x" }).GetAwaiter().GetResult();
+          throw new Exception("empty itemtype accepted"); }
+    catch (GlpiException) { }
+    try { c.FetchItemRowAsync("Monitor", none, new Dictionary<string, string> { ["serial"] = "ZZZ" }).GetAwaiter().GetResult();
+          throw new Exception("no-match accepted"); }
+    catch (GlpiException ex) { Assert(ex.Message.Contains("no item matches"), "no-match message"); }
+
+    using var c401 = new GlpiClient(cfg, new MockHandler(_ =>
+        new HttpResponseMessage(HttpStatusCode.Unauthorized) { Content = new StringContent("[\"ERROR_LOGIN_PARAMETERS_MISSING\"]") }));
+    try { c401.InitSessionAsync().GetAwaiter().GetResult(); throw new Exception("401 accepted"); }
+    catch (GlpiException ex) { Assert(ex.Message.Contains("HTTP 401"), "401 surfaced"); }
+});
+
+Check("ConnectionDef glpi type → GlpiConfig; declared-query rest fields validate + resolve", () =>
+{
+    var def = new ConnectionDef
+    {
+        Name = "GLPI", Type = "glpi",
+        Settings = new(StringComparer.OrdinalIgnoreCase)
+            { ["baseUrl"] = "https://g/apirest.php", ["appToken"] = "A", ["userToken"] = "U" },
+    };
+    var g = def.ToGlpiConfig();
+    AssertEq("A", g.AppToken, "appToken"); AssertEq("U", g.UserToken, "userToken");
+    Assert(ConnectionDef.IsSecretKey("appToken") && ConnectionDef.IsSecretKey("userToken"), "tokens are secrets");
+
+    var t = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="2in" height="0.7in" viewBox="0 0 2000 700">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:query name="Asset" connection="GLPI" query="Computer" filter-serial="{Serial}"/>
+            <etiq:field name="Serial" source="prompt" caption="Serial:"/>
+            <etiq:field name="Name" source="rest" from="Asset" column="name" override="true"/>
+            <etiq:field name="Inv" source="rest" from="Asset" column="otherserial"/>
+            <etiq:field name="Bad" source="rest" from="Nope" column="x"/>
+            <etiq:field name="NoCol" source="rest" from="Asset"/>
+          </etiq:label></metadata>
+          <text x="8" y="20" data-field="Name">n</text>
+          <text x="8" y="40" data-field="Inv">i</text>
+          <text x="8" y="60" data-field="Bad">b</text>
+          <text x="8" y="80" data-field="NoCol">c</text>
+          <text x="8" y="90" data-field="Serial">s</text>
+        </svg>
+        """);
+    var findings = TemplateValidator.Validate(t);
+    Assert(findings.Any(f => f.Code == "field-from" && f.Message.Contains("Bad")), "unknown from flagged");
+    Assert(findings.Any(f => f.Code == "field-rest" && f.Message.Contains("NoCol")), "missing column flagged");
+    Assert(!findings.Any(f => f.Message.Contains("'Name'") || f.Message.Contains("'Inv'")), "good fields clean: " +
+        string.Join("; ", findings.Select(f => f.Message)));
+    Assert(!findings.Any(f => f.Code == "field-override"), "override allowed on rest");
+
+    var t2 = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="2in" height="0.7in" viewBox="0 0 2000 700">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:query name="Asset" connection="GLPI" query="{Nope}" filter-serial="x"/>
+            <etiq:field name="Name" source="rest" from="Asset" column="name"/>
+          </etiq:label></metadata>
+          <text x="8" y="20" data-field="Name">n</text>
+        </svg>
+        """);
+    Assert(TemplateValidator.Validate(t2).Any(f => f.Code == "source-ref" && f.Message.Contains("query references")),
+        "field-fed query= is cross-checked");
+
+    var ctx = new ResolveContext
+    {
+        PromptValues = new() { ["Serial"] = "SN1", ["Name"] = "" },
+        SourceColumn = (src, col) => src == "Asset" ? (col == "name" ? "PC-1" : "INV-1") : null,
+    };
+    var r = new FieldResolver(t, ctx);
+    AssertEq("PC-1", r.Resolve("Name"), "from= column via SourceColumn");
+    AssertEq("INV-1", r.Resolve("Inv"), "second column");
+    var typed = new ResolveContext
+    {
+        PromptValues = new() { ["Serial"] = "SN1", ["Name"] = "Typed" },
+        SourceColumn = (_, _) => "PC-1",
+    };
+    AssertEq("Typed", new FieldResolver(t, typed).Resolve("Name"), "override on rest");
+});
+
+Check("query-fed pick list: validator, ctx.ListRows resolution, GLPI virtual columns + paging", () =>
+{
+    var t = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="2in" height="0.7in" viewBox="0 0 2000 700">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:query name="Inventory" connection="GLPI" query="Computer"/>
+            <etiq:list name="Assets" key="otherserial" from="Inventory"/>
+            <etiq:list name="Bad" key="k" from="Nope"/>
+            <etiq:field name="Inv"  source="list" list="Assets" column="otherserial"/>
+            <etiq:field name="Name" source="list" list="Assets" column="name"/>
+            <etiq:field name="B"    source="list" list="Bad" column="k"/>
+          </etiq:label></metadata>
+          <text x="8" y="20" data-field="Inv">i</text>
+          <text x="8" y="40" data-field="Name">n</text>
+          <text x="8" y="60" data-field="B">b</text>
+        </svg>
+        """);
+    var findings = TemplateValidator.Validate(t);
+    Assert(findings.Any(f => f.Code == "list-from" && f.Message.Contains("'Bad'")), "unknown from= flagged");
+    Assert(!findings.Any(f => f.Code == "list-rows"), "query-fed list needs no embedded rows");
+    Assert(!findings.Any(f => f.Code == "source-open"), "a list-consumed query is expected to be open");
+
+    var rows = new List<Dictionary<string, string>>
+    {
+        new() { ["otherserial"] = "INV-1", ["name"] = "PC-1" },
+        new() { ["otherserial"] = "INV-2", ["name"] = "PC-2" },
+    };
+    var r = new FieldResolver(t, new ResolveContext
+    {
+        ListSelections = new() { ["Assets"] = "INV-2" },
+        ListRows = name => name == "Assets" ? rows : null,
+    });
+    AssertEq("PC-2", r.Resolve("Name"), "selected fetched row feeds list fields");
+    try { new FieldResolver(t, new ResolveContext { ListSelections = new() { ["Assets"] = "INV-2" } }).Resolve("Name");
+          throw new Exception("resolved without rows"); }
+    catch (ResolveException ex) { Assert(ex.Message.Contains("not loaded"), "unloaded rows named"); }
+
+    int pages = 0;
+    var handler = new MockHandler(req =>
+    {
+        if (req.RequestUri!.AbsolutePath.EndsWith("/initSession")) return Json("""{"session_token":"S"}""");
+        if (req.RequestUri.AbsolutePath.EndsWith("/killSession")) return Json("true");
+        pages++;
+        string q = Uri.UnescapeDataString(req.RequestUri.Query);
+        Assert(q.Contains("expand_dropdowns=true"), "expanded");
+        if (q.Contains("range=0-199"))
+        {
+            var sb = new StringBuilder("[");
+            for (int i = 0; i < 200; i++) sb.Append(i > 0 ? "," : "").Append($$"""{"id":{{i}},"otherserial":"INV-{{i}}","computermodels_id":"M{{i}}","computertypes_id":"Tablet","manufacturers_id":"Acme","locations_id":"Site > Bldg A > Room {{i}}"}""");
+            return new HttpResponseMessage(HttpStatusCode.PartialContent)
+                { Content = new StringContent(sb.Append(']').ToString(), Encoding.UTF8, "application/json") };
+        }
+        Assert(q.Contains("range=200-399"), "second page: " + q);
+        return Json("""[{"id":200,"otherserial":"INV-200","monitormodels_id":"U2412","locations_id":"D&#38;B &#62; Front Office"},{"id":201,"otherserial":"TPL","is_template":1},{"id":202,"otherserial":"GONE","is_deleted":"1"}]""");
+    });
+    using var c = new GlpiClient(new GlpiConfig { BaseUrl = "https://g/apirest.php", AppToken = "A", UserToken = "U" }, handler);
+    var all = c.FetchItemRowsAsync("Computer", new Dictionary<string, string>()).GetAwaiter().GetResult();
+    AssertEq(201, all.Count, "both pages collected, stopped on short page; templates + deleted items dropped");
+    AssertEq(2, pages, "two list calls");
+    AssertEq("M7", all[7]["model"].GetString()!, "virtual model column");
+    AssertEq("Tablet", all[7]["type"].GetString()!, "virtual type column");
+    AssertEq("Acme", all[7]["manufacturer"].GetString()!, "virtual manufacturer column");
+    AssertEq("Room 7", all[7]["location"].GetString()!, "location leaf");
+    AssertEq("Bldg A", all[7]["location_parent"].GetString()!, "location parent");
+    AssertEq("U2412", all[200]["model"].GetString()!, "model alias works per class");
+    AssertEq("D&B > Front Office", all[200]["locations_id"].GetString()!, "HTML entities decoded");
+    AssertEq("Front Office", all[200]["location"].GetString()!, "leaf after decoding");
+    AssertEq("D&B", all[200]["location_parent"].GetString()!, "parent after decoding");
+});
+
+Check("PrintLog: append/read round-trip, window crosses months, torn lines skipped", () =>
+{
+    string dir = Path.Combine(Path.GetTempPath(), "etiq-printlog-test-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        PrintLog.Directory = dir;
+        PrintLog.Append("job1", "spooled", "tpl", "PrinterX", page: 1, pages: 1,
+            values: new Dictionary<string, string> { ["Tag"] = "INV-1", ["Name"] = "PC-1" });
+        PrintLog.Append("job1", "completed", "tpl", "PrinterX");
+        // a torn/foreign line must not break reads
+        File.AppendAllText(Directory.GetFiles(dir, "printlog-*.jsonl")[0], "{ not json\n");
+        PrintLog.Append("job2", "spooled", "tpl", "PrinterX", page: 1, pages: 1,
+            values: new Dictionary<string, string> { ["Tag"] = "INV-2" });
+        var all = PrintLog.Read(DateTimeOffset.Now.AddMonths(-3));
+        AssertEq(3, all.Count, "three parseable events");
+        Assert(all[0]["values"].GetProperty("Tag").GetString() == "INV-1", "values round-trip");
+        AssertEq("completed", all[1]["event"].GetString()!, "status follow-up kept");
+        var none = PrintLog.Read(DateTimeOffset.Now.AddMinutes(5));
+        AssertEq(0, none.Count, "future cutoff excludes everything");
+        PrintLog.Directory = null;
+        PrintLog.Append("job3", "spooled");   // disabled: no throw, no write
+        AssertEq(0, PrintLog.Read(DateTimeOffset.Now.AddMonths(-3)).Count, "disabled: read is empty, append a no-op");
+    }
+    finally
+    {
+        PrintLog.Directory = null;
+        try { Directory.Delete(dir, true); } catch { }
+    }
 });
 
 // ---------- printer/media registry + feasibility ----------

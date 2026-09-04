@@ -4,7 +4,76 @@ All notable changes to Etiquette are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver
 (pre-1.0: minor bumps may change behavior).
 
-## [Unreleased]
+## [0.8.0] — 2026-09-04
+
+### Added
+- **GLPI connections** — a new connection type (`glpi`: API endpoint,
+  App-Token, user token; both tokens DPAPI-protected, Test opens and
+  closes a real session). An `etiq:query` on a GLPI connection names the
+  item type (`query="Computer"`, `Monitor`, `NetworkEquipment`, `Printer`,
+  …) and picks one item by `param-id` or by `filter-<column>` (serial,
+  otherserial, name…; GLPI's substring search is narrowed to an exact,
+  case-insensitive match). Dropdown foreign keys come back expanded, so
+  `locations_id` is the location's name. Fields consume a GLPI query with
+  `source="rest" from="…" column="…"` — `override="true"` works exactly as
+  for Epicor pulls. First non-Epicor consumer of the connections platform;
+  the concrete use case is equipment ID tags on a Brother P-touch (any
+  Windows-driver tape printer prints through the normal driver path).
+  `examples/glpi-asset-tag.svg` is an 18 mm-tape starter. `query=` may
+  itself be `{Field}` (a pick list of asset classes), and GLPI rows carry
+  virtual `model` / `type` / `manufacturer` / `location` columns so one
+  template spans every class.
+- **Query-fed pick lists** — `etiq:list from="QueryName"` fills a picker
+  from ALL rows of a declared query (live inventory, paged, background
+  fetch in the editor) instead of embedded rows; the chosen row feeds
+  `source="list"` fields as usual. First use: pick the asset by inventory
+  number from GLPI. F4 Lists tab: "Rows from query".
+- **Help > Options > Print offset** — per-printer x/y nudge in mils for
+  drivers whose reported hard margin doesn't match where the image
+  lands (tape printers typically print a few mils low). Stored by
+  printer name; applied to whichever printer a job goes to.
+- **Compose dialog, decluttered** — the segment grid shows only newline /
+  value / ref / sep plus a one-line "transforms" summary; selecting a row
+  edits its transforms in a grouped pane (piece: split/part/start/len ·
+  format/case/pad/if-empty · map/default). A live **Preview** line shows
+  the composed result with sample values as you edit.
+- **Segment `split` / `part`** — keep one delimited piece of a value
+  (`split="&gt;" part="-2"` on "Site > Bldg > Room" → "Bldg"; negative
+  counts from the end). Runs before start/len.
+- **Connections export picks connections** — Export… now asks which
+  connections go into the bundle (current one pre-ticked), so a GLPI
+  print station never receives ERP credentials.
+- **Print log** — every print appends JSON-lines records (monthly files,
+  default %APPDATA%\Etiquette\logs; settings `printLog=off` /
+  `printLogDir` for a shared location): timestamp, template, printer,
+  station/user, and the resolved values exactly as printed. A spooler
+  watcher then records the job's real fate — completed, error (offline /
+  out of tape), or stuck in the queue. File > Print Log… views it with a
+  configurable look-back (default 1 month, not capped to it) and can
+  REPRINT any record verbatim; print-station mode reaches the same viewer
+  via `buttons="…,log"` on etiq:panel or the deliberate Ctrl+Shift+L
+  chord. The log is the future series manifest, v0.
+- **View > Fit to Window** — Ctrl+0, or double middle-click on the canvas.
+- **File > Label Size…** — shows the label's physical size and resizes
+  it (width/height/unit; undoable). Content keeps its position; the
+  print page follows the new size.
+
+### Fixed
+- **Print page size** — the native print path now declares the label's
+  own size as a custom paper form (portrait form + landscape rotation,
+  zero margins) instead of inheriting the driver's default form. A
+  Brother tape driver previously cut every label at its 100 mm default;
+  an office printer placed the label on a Letter page.
+- Templates whose queries were authored as `etiq:query` (the F4 spelling
+  since the rename) never fetched in the editor — the preview only looked
+  for the old `etiq:source` element.
+
+### Changed
+- `etiq:source` (the declared read-only remote fetch) is renamed
+  **`etiq:query`** — "source" already means a field's value-kind, and
+  queries are strictly read-only (unlike the planned `etiq:series`
+  transactions, see docs/series.md). The old spelling parses forever;
+  F4 writes the new name.
 
 ## [0.7.0] — 2026-08-25
 

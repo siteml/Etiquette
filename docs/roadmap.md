@@ -164,8 +164,10 @@ boundary exists.
   raw-ZPL, behind the same interface, Brother-only, never in core. Costs a
   vendor runtime install on the station. Until then the D410 prints via the
   plain driver path with queue-default cut settings.
-- **GLPI equipment ID tags** (QR on P-touch tape) — the concrete use case
-  driving `source="rest"` plus the b-PAC path, and the first non-Epicor
-  consumer of the platform. Sequenced after the shop-floor path is solid.
+- **GLPI equipment ID tags** (QR on P-touch tape) — the data side shipped
+  (unreleased, post-0.7.0): `glpi` connection type + `etiq:query` item
+  fetches by id or column filter, `examples/glpi-asset-tag.svg`. The
+  D410 prints through the plain driver path; the b-PAC path above stays
+  optional polish (cut control, media-width query).
 - JRXML and RDL exporters
 - Non-Windows print paths (CUPS raw)

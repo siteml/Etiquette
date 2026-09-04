@@ -40,6 +40,9 @@ public sealed class ResolveContext
 
     /// <summary>Remote lookup for rest fields: (connection, query, pick) → value.</summary>
     public Func<string, string?, string, string?>? Rest { get; init; }
+    /// <summary>Rows of a query-fed pick list (etiq:list from=): list name →
+    /// rows already fetched by the host, or null when not loaded yet.</summary>
+    public Func<string, IReadOnlyList<Dictionary<string, string>>?>? ListRows { get; init; }
 
     /// <summary>Last-good-value cache for on-fail="cached" (key = field name).
     /// The engine persists this between jobs; tests inject a dictionary.</summary>
@@ -116,10 +119,12 @@ public sealed class FieldResolver
             "serial" => ResolveSerial(f),
             // override="true": the operator's typed value beats the pull;
             // empty entry = fetch as usual
-            "epicor" when f.Override &&
+            "epicor" or "rest" when f.Override &&
                           _ctx.PromptValues.GetValueOrDefault(f.Name, "") is { Length: > 0 } typed
                 => typed,
-            "epicor" when f.From is not null => ResolveRemote(f, () =>
+            // from= reads a column of a declared etiq:query, whatever the
+            // connection type behind it (epicor BAQ row, glpi item, ...)
+            "epicor" or "rest" when f.From is not null => ResolveRemote(f, () =>
                 _ctx.SourceColumn?.Invoke(f.From, f.Column ?? "")
                     ?? throw new InvalidOperationException($"no provider for source '{f.From}'")),
             "epicor" => ResolveRemote(f, () =>
@@ -199,7 +204,12 @@ public sealed class FieldResolver
         if (keyValue is null)
             throw new ResolveException(f.Name,
                 $"no row selected for list '{list.Name}' and the list has no default");
-        var row = list.RowByKey(keyValue)
+        IEnumerable<Dictionary<string, string>> rows = list.From is null
+            ? list.Rows
+            : _ctx.ListRows?.Invoke(list.Name)
+              ?? throw new ResolveException(f.Name,
+                  $"list '{list.Name}': rows from query '{list.From}' are not loaded");
+        var row = list.RowByKey(rows, keyValue)
             ?? throw new ResolveException(f.Name,
                 $"list '{list.Name}' has no row with {list.Key}='{keyValue}'");
         return row.GetValueOrDefault(f.Column ?? "", "");
@@ -267,10 +277,19 @@ public sealed class FieldResolver
         return string.Join("\n", lines);
     }
 
-    // --- transforms, fixed order: start/len → format → case → pad → map ---
+    // --- transforms, fixed order: split/part → start/len → format → case → pad → map ---
 
     private string ApplySegTransforms(string field, int idx, EtiqTemplate.Seg s, string v)
     {
+        if (s.Split is { Length: > 0 } delim)
+        {
+            // "Site > Bldg A > Room 12" split=" > " part="-2" → "Bldg A";
+            // an out-of-range part is empty (so sep= stays quiet), never an error
+            var pieces = v.Split(delim, StringSplitOptions.None);
+            int part = (int)(EtiqTemplate.ParseNum(s.Part) ?? -1);
+            if (part < 0) part += pieces.Length;
+            v = part >= 0 && part < pieces.Length ? pieces[part].Trim() : "";
+        }
         if (s.Start is not null || s.Len is not null)
         {
             int start = (int)(EtiqTemplate.ParseNum(s.Start) ?? 0);

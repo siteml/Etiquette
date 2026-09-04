@@ -40,9 +40,22 @@ public sealed class ComposeDialog : Form
     }
     private readonly List<VarPage> _pages = new();
 
-    public ComposeDialog(XElement field, IEnumerable<string> switchCandidates)
+    /// <summary>preview: given a COPY of the field as the dialog would save
+    /// it, return the composed text with sample values (or an error
+    /// message). Null = no preview line.</summary>
+    private readonly Func<XElement, string>? _preview;
+    private readonly Label _previewLbl = new()
+    {
+        Dock = DockStyle.Bottom, Height = 26, AutoEllipsis = true,
+        TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(6, 0, 6, 0),
+        Font = new Font(FontFamily.GenericMonospace, 9.5f),
+    };
+
+    public ComposeDialog(XElement field, IEnumerable<string> switchCandidates,
+                         Func<XElement, string>? preview = null)
     {
         _field = field;
+        _preview = preview;
 
         Text = $"Compose — {(string?)field.Attribute("name") ?? "(unnamed)"}";
         StartPosition = FormStartPosition.CenterParent;
@@ -72,8 +85,8 @@ public sealed class ComposeDialog : Form
             Dock = DockStyle.Top, Height = 22, AutoEllipsis = true,
             TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(6, 0, 6, 0),
             Text = "Rows concatenate in order. newline ✓ = line break; sep goes on the FOLLOWING " +
-                   "row — emitted before it, only when both sides are non-empty " +
-                   "(\", \" on the State row → \"City, State\"). Right-click rows to insert/reorder.",
+                   "row — emitted before it, only when both sides are non-empty. " +
+                   "Select a row to edit its transforms below. Right-click rows to insert/reorder.",
         };
 
         var bottom = new FlowLayoutPanel
@@ -89,11 +102,14 @@ public sealed class ComposeDialog : Form
         Controls.Add(_tabs);
         Controls.Add(hint);
         Controls.Add(top);
+        if (_preview is not null) Controls.Add(_previewLbl);
         Controls.Add(bottom);
         AcceptButton = ok;
         CancelButton = cancel;
 
-        _conditional.CheckedChanged += (_, _) => OnConditionalToggled();
+        _conditional.CheckedChanged += (_, _) => { OnConditionalToggled(); RefreshPreview(); };
+        _collapse.CheckedChanged += (_, _) => RefreshPreview();
+        _switchOn.TextChanged += (_, _) => RefreshPreview();
         _addVar.Click += (_, _) =>
         {
             var p = AddPage("exact", "", null);
@@ -107,6 +123,27 @@ public sealed class ComposeDialog : Form
         };
 
         LoadFromField();
+        RefreshPreview();
+        ClientSize = new Size(960, 560);
+    }
+
+    /// <summary>Compose the field as it would be saved and show the sample
+    /// result. Debounce-free: composing a handful of segs is instant.</summary>
+    private void RefreshPreview()
+    {
+        if (_preview is null || _pages.Count == 0) return;
+        try
+        {
+            var tmp = new XElement(_field);
+            CommitInto(tmp, quiet: true);
+            _previewLbl.Text = "Preview:  " + _preview(tmp).Replace("\n", " ⏎ ");
+            _previewLbl.ForeColor = SystemColors.ControlText;
+        }
+        catch (Exception ex)
+        {
+            _previewLbl.Text = "Preview:  " + ex.Message;
+            _previewLbl.ForeColor = Color.Firebrick;
+        }
     }
 
     // ---------- load ----------
@@ -159,15 +196,24 @@ public sealed class ComposeDialog : Form
         p.Strip = strip;
 
         p.Grid = GridTools.NewGrid();
-        GridTools.AddSegColumns(p.Grid);
+        GridTools.AddSegColumns(p.Grid, compact: true);
         GridTools.AttachRowTools(p.Grid);
         if (segSource is not null) GridTools.LoadSegs(p.Grid, segSource);
+        var details = BuildDetailsPane(p.Grid);
 
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));
         layout.Controls.Add(strip, 0, 0);
         layout.Controls.Add(p.Grid, 0, 1);
+        layout.Controls.Add(details, 0, 2);
+        p.Grid.CellValueChanged += (_, _) => { GridTools.RefreshSummaries(p.Grid); RefreshPreview(); };
+        p.Grid.RowsRemoved += (_, _) => RefreshPreview();
+        p.Grid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (p.Grid.IsCurrentCellDirty) p.Grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        };
 
         p.Page = new TabPage();
         p.Page.Controls.Add(layout);
@@ -253,38 +299,152 @@ public sealed class ComposeDialog : Form
         UpdateStrips();
     }
 
+    // ---------- details pane (transforms of the selected row) ----------
+
+    /// <summary>Editors for the hidden transform cells of the grid's current
+    /// row, grouped the way the resolver applies them. Writes straight into
+    /// the row's cells, so LoadSegs/CommitSegs stay the single XML path.</summary>
+    private Control BuildDetailsPane(DataGridView g)
+    {
+        var pane = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 8, RowCount = 3, Padding = new Padding(4, 2, 4, 0),
+        };
+        for (int i = 0; i < 4; i++)
+        {
+            pane.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 74));
+            pane.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        }
+        for (int i = 0; i < 3; i++) pane.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+
+        var editors = new Dictionary<string, Control>();
+        bool loading = false;
+        void Add(int col, int row, string label, string attr, Control c, string tip)
+        {
+            var l = new Label { Text = label, TextAlign = ContentAlignment.MiddleRight, Dock = DockStyle.Fill };
+            c.Dock = DockStyle.Fill; c.Margin = new Padding(2, 6, 8, 6);
+            pane.Controls.Add(l, col * 2, row);
+            pane.Controls.Add(c, col * 2 + 1, row);
+            editors[attr] = c;
+            new ToolTip().SetToolTip(c, tip);
+            Control input = c is FlowLayoutPanel fl ? fl.Controls[0] : c;
+            void Changed()
+            {
+                if (loading || g.CurrentRow is null || g.CurrentRow.IsNewRow) return;
+                if (input.Parent is FlowLayoutPanel p2 && p2.Controls.OfType<CheckBox>().FirstOrDefault()?.Checked == true)
+                    return;   // the blank checkbox owns the cell right now
+                string v = input is ComboBox cb ? cb.Text : ((TextBox)input).Text;
+                g.CurrentRow.Cells[attr].Value = v == "" ? null : v;
+                GridTools.RefreshSummaries(g);
+                RefreshPreview();
+            }
+            if (input is ComboBox combo) { combo.TextChanged += (_, _) => Changed(); combo.SelectedIndexChanged += (_, _) => Changed(); }
+            else input.TextChanged += (_, _) => Changed();
+        }
+        // row 0: pick a piece
+        Add(0, 0, "split on", "split", new TextBox(), "Delimiter to split the value on (\">\", \",\", \" \"). Pieces are trimmed.");
+        Add(1, 0, "piece #", "part", new TextBox(), "0-based; negative counts from the end: -1 = last, -2 = one before. Default -1.");
+        Add(2, 0, "start", "start", new TextBox(), "Substring start (0-based), after split.");
+        Add(3, 0, "length", "len", new TextBox(), "Substring length; empty = to the end.");
+        // row 1: format
+        Add(0, 1, "format", "format", new TextBox(), "date:yyMM, number:0.00 … (same as data-format)");
+        var caseBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+        caseBox.Items.AddRange(new object[] { "", "upper", "lower", "title" });
+        Add(1, 1, "case", "case", caseBox, "Letter case applied after format.");
+        Add(2, 1, "pad", "pad", new TextBox(), "side:char:width, e.g. left:0:6");
+        Add(3, 1, "if empty", "if-empty", new TextBox(), "Text used when this segment resolves empty. Type \"\" for explicitly blank.");
+        // row 2: lookup — default gets a "blank" checkbox: an ABSENT default
+        // blocks the print on an unmatched value, an explicitly BLANK one
+        // (stored as default="", spelled "" in the grid) falls back to empty
+        Add(0, 2, "map", "map", new TextBox(), "Name of an etiq:map to run the value through.");
+        var dflText = new TextBox();
+        var dflBlank = new CheckBox { Text = "blank", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(4, 8, 0, 0) };
+        var dflWrap = new FlowLayoutPanel { WrapContents = false, Margin = new Padding(0) };
+        dflText.Width = 72; dflText.Margin = new Padding(2, 6, 0, 6);
+        new ToolTip().SetToolTip(dflBlank, "Unmatched values fall back to EMPTY instead of blocking the print");
+        dflWrap.Controls.Add(dflText); dflWrap.Controls.Add(dflBlank);
+        Add(1, 2, "default", "default", dflWrap, "Map result when no row matches. Empty = NO default (an unmatched value blocks the print); tick blank to fall back to empty.");
+        // the wrap already carries the row margin — zero it so the inner
+        // textbox lines up with the other rows' editors
+        dflWrap.Margin = new Padding(0);
+        dflText.Margin = new Padding(2, 6, 0, 6);
+        dflBlank.Margin = new Padding(4, 9, 0, 0);
+        dflBlank.CheckedChanged += (_, _) =>
+        {
+            dflText.Enabled = !dflBlank.Checked;
+            if (loading || g.CurrentRow is null || g.CurrentRow.IsNewRow) return;
+            g.CurrentRow.Cells["default"].Value = dflBlank.Checked ? "\"\""
+                : dflText.Text == "" ? null : dflText.Text;
+            GridTools.RefreshSummaries(g);
+            RefreshPreview();
+        };
+
+        void LoadRow()
+        {
+            loading = true;
+            bool has = g.CurrentRow is not null && !g.CurrentRow.IsNewRow &&
+                       g.CurrentRow.Cells["newline"].Value is not true;
+            foreach (var (attr, c) in editors)
+            {
+                c.Enabled = has;
+                string v = has ? g.CurrentRow!.Cells[attr].Value?.ToString() ?? "" : "";
+                if (c is FlowLayoutPanel wrap)
+                {
+                    var tb = (TextBox)wrap.Controls[0];
+                    var chk = wrap.Controls.OfType<CheckBox>().First();
+                    chk.Enabled = has;
+                    chk.Checked = v == "\"\"";
+                    tb.Text = chk.Checked ? "" : v;
+                    tb.Enabled = has && !chk.Checked;
+                }
+                else if (c is ComboBox cb) cb.SelectedItem = cb.Items.Contains(v) ? v : "";
+                else ((TextBox)c).Text = v;
+            }
+            loading = false;
+        }
+        g.CurrentCellChanged += (_, _) => LoadRow();
+        g.CellValueChanged += (_, e) => { if (e.RowIndex == g.CurrentRow?.Index) LoadRow(); };
+        LoadRow();
+        return pane;
+    }
+
     // ---------- commit ----------
 
     /// <summary>Write the dialog state back to the field element. Returns
     /// false (and keeps the dialog open) on obviously broken input.</summary>
-    private bool CommitBack()
+    private bool CommitBack() => CommitInto(_field, quiet: false);
+
+    /// <summary>Write the dialog state into target (the real field on OK,
+    /// a scratch copy for the preview). quiet=true skips the message box
+    /// and the EndEdit (the preview must not disturb an in-progress cell).</summary>
+    private bool CommitInto(XElement target, bool quiet)
     {
-        if (_conditional.Checked && _switchOn.Text.Trim() == "")
+        if (!quiet && _conditional.Checked && _switchOn.Text.Trim() == "")
         {
             MessageBox.Show(this, "Conditional compose needs a switch-on field " +
                 "(the field whose value picks the variant).", "Compose");
             return false;
         }
-        _field.SetAttributeValue("collapse-blank-lines", _collapse.Checked ? "true" : null);
-        _field.Elements(NS + "seg").Remove();
-        _field.Elements(NS + "variant").Remove();
+        target.SetAttributeValue("collapse-blank-lines", _collapse.Checked ? "true" : null);
+        target.Elements(NS + "seg").Remove();
+        target.Elements(NS + "variant").Remove();
         if (_conditional.Checked)
         {
-            _field.SetAttributeValue("switch-on", _switchOn.Text.Trim());
+            target.SetAttributeValue("switch-on", _switchOn.Text.Trim());
             foreach (var p in _pages)
             {
                 var v = new XElement(NS + "variant");
                 string kind = (string?)p.Kind.SelectedItem ?? "default";
                 if (kind == "exact") v.SetAttributeValue("when", p.Match.Text);
                 else if (kind == "prefix") v.SetAttributeValue("prefix", p.Match.Text);
-                GridTools.CommitSegs(p.Grid, v);
-                _field.Add(v);
+                GridTools.CommitSegs(p.Grid, v, endEdit: !quiet);
+                target.Add(v);
             }
         }
         else
         {
-            _field.SetAttributeValue("switch-on", null);
-            GridTools.CommitSegs(_pages[0].Grid, _field);
+            target.SetAttributeValue("switch-on", null);
+            GridTools.CommitSegs(_pages[0].Grid, target, endEdit: !quiet);
         }
         return true;
     }

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Etiquette example: GLPI equipment ID tag for 18 mm P-touch tape
+     (2.4 in of continuous tape; keep ~0.05 in clear top/bottom).
+     Two pickers: the asset CLASS (embedded list) and then the ASSET itself,
+     fetched live from GLPI (query-fed list) and chosen by inventory number.
+     Every printed value is a column of the chosen row; the QR carries the
+     asset's GLPI page URL. Needs a machine connection named "GLPI"
+     (File > Connections…, type glpi). Edit the "Property of" block and the
+     host in the Url compose field. -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="2.4in" height="0.71in" viewBox="0 0 2400 710">
+  <metadata>
+    <etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+      <!-- 1. asset class: the operator picks it; the query path and the QR
+              URL both follow. Declare this list BEFORE the asset list. -->
+      <etiq:list name="Types" key="Label" default="Computer" caption="Class:">
+        <etiq:row Label="Computer"    Type="Computer"   Page="computer"/>
+        <etiq:row Label="Monitor"     Type="Monitor"    Page="monitor"/>
+        <etiq:row Label="Peripheral"  Type="Peripheral" Page="peripheral"/>
+        <etiq:row Label="Printer"     Type="Printer"    Page="printer"/>
+        <etiq:row Label="Network"     Type="NetworkEquipment" Page="networkequipment"/>
+        <etiq:row Label="Phone"       Type="Phone"      Page="phone"/>
+        <etiq:row Label="Cable"       Type="Cable"      Page="cable"/>
+      </etiq:list>
+      <etiq:field name="ItemType" source="list" list="Types" column="Type"/>
+      <etiq:field name="Page"     source="list" list="Types" column="Page"/>
+
+      <!-- 2. the inventory of that class, live from GLPI, as a picker keyed
+              on the inventory/asset number (GLPI column otherserial).
+              Virtual columns model / type / manufacturer / location alias
+              the per-class dropdown names so one template fits all. -->
+      <etiq:query name="Inventory" connection="GLPI" query="{ItemType}"/>
+      <etiq:list name="Assets" key="otherserial" from="Inventory" caption="Asset:"/>
+      <etiq:field name="Inv"          source="list" list="Assets" column="otherserial"/>
+      <etiq:field name="Name"         source="list" list="Assets" column="name"/>
+      <etiq:field name="Manufacturer" source="list" list="Assets" column="manufacturer"/>
+      <etiq:field name="Model"        source="list" list="Assets" column="model"/>
+      <etiq:field name="Type"         source="list" list="Assets" column="type"/>
+      <etiq:field name="Location"     source="list" list="Assets" column="location"/>
+      <etiq:field name="Id"           source="list" list="Assets" column="id"/>
+
+      <etiq:field name="Desc" source="compose">
+        <etiq:seg ref="Manufacturer"/>
+        <etiq:seg ref="Model" sep=" "/>
+        <etiq:seg ref="Type" sep=" "/>
+      </etiq:field>
+      <!-- the name line is the HOSTNAME — meaningful for computers only;
+           other classes leave that line blank -->
+      <etiq:field name="HostLine" source="compose" switch-on="ItemType">
+        <etiq:variant when="Computer"><etiq:seg ref="Name"/></etiq:variant>
+        <etiq:variant><etiq:seg value=""/></etiq:variant>
+      </etiq:field>
+      <etiq:field name="IdLine" source="compose">
+        <etiq:seg value="ID: "/>
+        <etiq:seg ref="Inv"/>
+      </etiq:field>
+      <etiq:field name="Url" source="compose">
+        <etiq:seg value="http://glpi.example.local/front/"/>
+        <etiq:seg ref="Page"/>
+        <etiq:seg value=".form.php?id="/>
+        <etiq:seg ref="Id"/>
+      </etiq:field>
+    </etiq:label>
+  </metadata>
+
+  <g data-layer="Fixed">
+    <text x="80" y="140" font-family="Arial" font-size="80">Property of: Example Company</text>
+    <text x="80" y="225" font-family="Arial" font-size="80">100 Example Ave</text>
+    <text x="80" y="310" font-family="Arial" font-size="80">Springfield, IL 62701</text>
+  </g>
+
+  <g data-layer="Fields">
+    <!-- four lines at 80 px pitch: description, location, name (the
+         hostname for computers — GLPI's name field, blank for most other
+         classes), then the asset ID -->
+    <text x="80" y="400" font-family="Consolas" font-size="70"
+          data-field="Desc" data-width="1600" data-overflow="shrink">Pritom M10 Tablet</text>
+    <text x="80" y="480" font-family="Consolas" font-size="70"
+          data-field="Location" data-width="1600" data-overflow="shrink">Front Office</text>
+    <text x="80" y="560" font-family="Consolas" font-size="70"
+          data-field="HostLine" data-width="1600" data-overflow="shrink">WS-FRONT-01</text>
+    <text x="80" y="640" font-family="Consolas" font-size="70"
+          data-field="IdLine" data-width="1600" data-overflow="shrink">ID: DB-TAB-00002</text>
+    <rect x="1760" y="80" width="560" height="560"
+          data-barcode="qr" data-field="Url" data-module-mils="17"/>
+  </g>
+</svg>

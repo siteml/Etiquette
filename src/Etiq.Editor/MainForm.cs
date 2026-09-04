@@ -56,6 +56,17 @@ public sealed class MainForm : Form
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _sourceFails = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte>
         _fetchingSources = new();   // cross-source cycle guard
+    // query-fed pick lists (etiq:list from=): fetched row SETS by query
+    // signature (query + dataset + resolved target/params/filters), the
+    // rows each list currently shows, and the signature they came from
+    private readonly Dictionary<string, List<Dictionary<string, string>>> _listRowSets = new();
+    private readonly Dictionary<string, string> _listRowFails = new();
+    private readonly HashSet<string> _listRowFetching = new();
+    private readonly Dictionary<string, string?> _listRowSig = new();
+    private readonly Dictionary<string, List<Dictionary<string, string>>> _listRowsLive = new();
+    // last word about each query-fed list (loading / failed / N rows, M skipped):
+    // shown AHEAD of a resolve error, which would otherwise hide it
+    private readonly Dictionary<string, (string Text, bool Error)> _listNotes = new();
 
     internal static string ConnectionsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -77,6 +88,14 @@ public sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         KeyPreview = true;
 
+        // print log: on by default, %APPDATA%\Etiquette\logs; settings
+        // printLog=off disables, printLogDir relocates (e.g. a UNC share so
+        // stations log centrally)
+        PrintLog.Directory = UpdateChecker.GetSetting("printLog") == "off" ? null
+            : UpdateChecker.GetSetting("printLogDir") ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Etiquette", "logs");
+
         // window/taskbar icon = the exe's own icon (assets/etiq.ico via
         // <ApplicationIcon>); never fatal if extraction fails
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
@@ -87,6 +106,7 @@ public sealed class MainForm : Form
         // top of the panels (and renders under the toolbar).
         BuildLayout();
         BuildMenu();
+        UpdateTitle();
 
         // this machine's persisted station role wins over any argument;
         // --station <file> is the transient (this-run-only) variant
@@ -415,7 +435,7 @@ public sealed class MainForm : Form
             if (pick == _sessionDataset) return;
             _sessionDataset = pick;
             _datasetCombo.BackColor = pick is null ? SystemColors.Window : Color.Gold;
-            _sourceRows.Clear(); _sourceFails.Clear();               // never mix rows across datasets
+            _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();               // never mix rows across datasets
             if (_modeButton.Checked && _doc is not null)
                 BuildDataPanel();
         };
@@ -424,7 +444,7 @@ public sealed class MainForm : Form
         tools.Items.Add(new ToolStripSeparator());
         var fit = new ToolStripButton("Fit")
         {
-            ToolTipText = "Zoom the label to fit the window " +
+            ToolTipText = "Zoom the label to fit the window — Ctrl+0 or double middle-click " +
                           "(mouse wheel over the canvas = zoom, middle-drag = pan)",
         };
         fit.Click += (_, _) => _canvas.FitToWindow();
@@ -454,6 +474,7 @@ public sealed class MainForm : Form
             _props.ShowSelection(_doc, o is null ? Array.Empty<EditorObject>() : _canvas.Selection);
             if (_canvas.Selection.Count == 1) SyncOutlineSelection(o);
             else SyncOutlineToGroup();
+            UpdateStatusInfo();
         };
         _canvas.CursorWorldMoved += p =>
             _statusPos.Text = $"x: {p.X:0} mils  y: {p.Y:0} mils";
@@ -517,6 +538,7 @@ public sealed class MainForm : Form
         var file = new ToolStripMenuItem("&File");
         file.DropDownItems.Add("&New…", null, (_, _) => FileNew()).ShortcutKeys(Keys.Control | Keys.N);
         file.DropDownItems.Add("&Open…", null, (_, _) => OpenDialog()).ShortcutKeys(Keys.Control | Keys.O);
+        file.DropDownItems.Add("Label Si&ze…", null, (_, _) => LabelSize());
         var recent = new ToolStripMenuItem("Open &Recent");
         file.DropDownItems.Add(recent);
         var miClose = (ToolStripMenuItem)file.DropDownItems.Add("&Close", null, (_, _) => CloseFile());
@@ -527,6 +549,7 @@ public sealed class MainForm : Form
         file.DropDownItems.Add(new ToolStripSeparator());
         var miPrint = (ToolStripMenuItem)file.DropDownItems.Add("&Print…", null, (_, _) => PrintNow());
         miPrint.ShortcutKeys(Keys.Control | Keys.P);
+        file.DropDownItems.Add("Print &Log…", null, (_, _) => ShowPrintLog());
         file.DropDownItems.Add(new ToolStripSeparator());
         var miValidate = (ToolStripMenuItem)file.DropDownItems.Add("&Validate", null, (_, _) => ShowValidation());
         miValidate.ShortcutKeys(Keys.F7);
@@ -536,7 +559,7 @@ public sealed class MainForm : Form
             using var dlg = new ConnectionsDialog();
             if (dlg.ShowDialog(this) == DialogResult.OK)
             {
-                _sourceRows.Clear(); _sourceFails.Clear();          // store changed: stale rows out
+                _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();          // store changed: stale rows out
                 PopulateDatasetCombo();
                 if (_modeButton.Checked && _doc is not null) BuildDataPanel();
             }
@@ -621,6 +644,10 @@ public sealed class MainForm : Form
         _viewDataItem = (ToolStripMenuItem)view.DropDownItems.Add(
             "Da&ta Mode", null, (_, _) => _modeButton.Checked = true);
         view.DropDownItems.Add(new ToolStripSeparator());
+        var miFit = (ToolStripMenuItem)view.DropDownItems.Add(
+            "&Fit to Window", null, (_, _) => _canvas.FitToWindow());
+        miFit.ShortcutKeys(Keys.Control | Keys.D0);
+        view.DropDownItems.Add(new ToolStripSeparator());
         var miStation = (ToolStripMenuItem)view.DropDownItems.Add(
             "Enter Print-&Station Mode…", null, (_, _) => EnterStationMode());
         view.DropDownOpening += (_, _) =>
@@ -689,9 +716,37 @@ public sealed class MainForm : Form
         _canvas.Doc = _doc;
         _doc.Undo.Changed += OutlineMaybeRefresh; // deletes/undo/redo update the tree
         RefreshDeclaredFieldNames();
-        _statusDoc.Text = "(unsaved new label)";
+        UpdateStatusInfo();
+        UpdateTitle();
         RefreshOutline();
         if (_modeButton.Checked) _modeButton.Checked = false;   // new docs open in Design
+    }
+
+    /// <summary>File > Label Size…: show the current physical size and
+    /// resize (undoable). Guard: Design mode only — the station never
+    /// reshapes its label.</summary>
+    private void LabelSize()
+    {
+        if (_doc is null)
+        {
+            MessageBox.Show(this, "Create or open a label first (File → New / Open).", "No document");
+            return;
+        }
+        if (_canvas.Mode != EditorMode.Design)
+        {
+            MessageBox.Show(this, "Switch to Design mode to change the label size.", "Data mode is locked");
+            return;
+        }
+        var vb = _doc.ViewBox;
+        var phys = _doc.PhysicalSize ?? (vb.W / 1000.0, vb.H / 1000.0, "in");
+        using var dlg = new NewLabelDialog(phys.W, phys.H, phys.Unit, resize: true);
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        if (dlg.WidthMils == (int)Math.Round(vb.W) && dlg.HeightMils == (int)Math.Round(vb.H) &&
+            dlg.WidthAttr == (string?)_doc.Root.Attribute("width") &&
+            dlg.HeightAttr == (string?)_doc.Root.Attribute("height")) return;
+        _doc.SetLabelSize(dlg.WidthAttr, dlg.HeightAttr, dlg.WidthMils, dlg.HeightMils);
+        _canvas.FitToWindow();
+        _canvas.Invalidate();
     }
 
     /// <summary>Layer new objects land on: the selected object's layer,
@@ -831,11 +886,12 @@ public sealed class MainForm : Form
     {
         if (_doc is null || !ConfirmDiscard()) return;
         _doc = null;
-        _sourceRows.Clear(); _sourceFails.Clear();
+        _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();
         _canvas.Doc = null;          // fires SelectionChanged(null) → inspector clears
         RefreshOutline();
         if (_modeButton.Checked) BuildDataPanel();   // empties the data pane
-        _statusDoc.Text = "no document";
+        UpdateStatusInfo();
+        UpdateTitle();
     }
 
     private void OpenDialog()
@@ -859,8 +915,9 @@ public sealed class MainForm : Form
         _canvas.Doc = _doc;
         _doc.Undo.Changed += OutlineMaybeRefresh; // deletes/undo/redo update the tree
         RefreshDeclaredFieldNames();
-        _statusDoc.Text = Path.GetFileName(path);
-        _sourceRows.Clear(); _sourceFails.Clear();                 // rows belong to the previous doc
+        UpdateStatusInfo();
+        UpdateTitle();
+        _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();                 // rows belong to the previous doc
         PushRecent(path);
         RefreshOutline();
         if (_modeButton.Checked) BuildDataPanel();
@@ -873,7 +930,8 @@ public sealed class MainForm : Form
         try
         {
             _doc.Save(path);
-            _statusDoc.Text = Path.GetFileName(_doc.Path!);
+            UpdateStatusInfo();
+            UpdateTitle();
             PushRecent(_doc.Path!);   // Save As introduces a brand-new path
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed"); }
@@ -982,13 +1040,33 @@ public sealed class MainForm : Form
             // Apply button: install a snapshot mid-session, one undo step each
             _doc.Undo.Push(_doc.ReplaceEtiqLabel(applied));
             AfterInstall();
-        });
+        }, SampleValues());
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         if (dlg.HasUnappliedChanges)                          // OK after Apply = no-op skip
         {
             _doc.Undo.Push(_doc.ReplaceEtiqLabel(dlg.Result));
             AfterInstall();
         }
+    }
+
+    /// <summary>Per-field sample values for previews: the last Data-mode
+    /// resolve when there is one, else each bound element's design-time
+    /// content (text, or data-value on barcodes) — the same thing the
+    /// canvas shows in Design mode.</summary>
+    private Dictionary<string, string> SampleValues()
+    {
+        var d = new Dictionary<string, string>();
+        if (_canvas.ResolvedValues is { } rv)
+            foreach (var (k, v) in rv) d[k] = v;
+        if (_doc is null) return d;
+        foreach (var el in _doc.Xml.Descendants())
+        {
+            string? f = (string?)el.Attribute("data-field");
+            if (string.IsNullOrEmpty(f) || d.ContainsKey(f)) continue;
+            string v = (string?)el.Attribute("data-value") ?? el.Value;
+            if (!string.IsNullOrWhiteSpace(v)) d[f] = v.Trim();
+        }
+        return d;
     }
 
     /// <summary>Feed the declared field names to the data-field dropdown in
@@ -1095,8 +1173,50 @@ public sealed class MainForm : Form
     /// <summary>Called on EVERY undo-stack change (deletes, undo/redo,
     /// drags...). Rebuilds the tree only when its content is actually out
     /// of date, so mouse-move drags stay cheap and flicker-free.</summary>
+    /// <summary>Titlebar = "<file>[*] — Etiquette Designer <version>".
+    /// The asterisk tracks EditorDoc.IsDirty (serialize-and-compare, so
+    /// undoing back to the saved state clears it). Called from every place
+    /// the document, its path, or its content changes; cheap enough that
+    /// over-calling is fine. (When tabs arrive, this string moves to the
+    /// tab header and the titlebar shows the active tab's.)</summary>
+    /// <summary>The status-bar slot the filename used to occupy (it lives
+    /// in the titlebar now): label size, then the selection — kind and
+    /// size/position of one object, or a count. What you're editing and
+    /// how big it is, at a glance.</summary>
+    private void UpdateStatusInfo()
+    {
+        if (_doc is null) { _statusDoc.Text = "no document"; return; }
+        var vb = _doc.ViewBox;
+        string info = $"{vb.W / 1000.0:0.##} × {vb.H / 1000.0:0.##} in";
+        var sel = _canvas.Selection;
+        if (sel.Count == 1)
+        {
+            var o = sel[0];
+            try
+            {
+                var b = o.Bounds();
+                info += $"    |    {o.Kind}: {b.W:0} × {b.H:0} mils @ ({b.X:0}, {b.Y:0})";
+            }
+            catch { info += $"    |    {o.Kind}"; }
+        }
+        else if (sel.Count > 1)
+            info += $"    |    {sel.Count} objects selected";
+        _statusDoc.Text = info;
+    }
+
+    private void UpdateTitle()
+    {
+        var ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        string app = $"Etiquette Designer {ver?.ToString(3)}";
+        if (_doc is null) { Text = app; return; }
+        string name = _doc.Path is null ? "(unsaved)" : Path.GetFileName(_doc.Path);
+        Text = $"{name}{(_doc.IsDirty ? "*" : "")} — {app}";
+    }
+
     private void OutlineMaybeRefresh()
     {
+        UpdateTitle();   // undo/redo/edits all pass through here
+        UpdateStatusInfo();  // size / selection bounds may have changed with them
         if (OutlineSignature() != _outlineSig) RefreshOutline();
         // ShowSelection is now cheap when nothing structural changed (it
         // just re-reads values) — and it also swaps in the right row set
@@ -1311,7 +1431,7 @@ public sealed class MainForm : Form
         _modeButton.Enabled = true;
         if (_menuStrip is not null) { _menuStrip.Visible = true; _menuStrip.Enabled = true; }
         if (_toolStrip is not null) _toolStrip.Visible = true;
-        Text = "Etiquette Designer";
+        UpdateTitle();
         if (_stationFit is not null) _canvas.Resize -= _stationFit;
         _canvas.FitToWindow();
     }
@@ -1325,7 +1445,36 @@ public sealed class MainForm : Form
             StationExitPrompt();
             return true;
         }
+        // station log chord: deliberate (Ctrl+Shift+L), never on the panel
+        // unless the template opts in with buttons="…,log"
+        if (_stationLocked && keyData == (Keys.Control | Keys.Shift | Keys.L))
+        {
+            ShowPrintLog();
+            return true;
+        }
         return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    /// <summary>Print log viewer. Reprint replays the selected record's
+    /// logged values through the template's own print path (etiq:panel
+    /// direct settings when declared, the system dialog otherwise); with
+    /// no open document the log is view-only.</summary>
+    private void ShowPrintLog()
+    {
+        Action<Dictionary<string, string>>? reprint = null;
+        if (_doc is not null)
+        {
+            reprint = values =>
+            {
+                var panel = EtiqTemplate.Parse(_doc.Xml.ToString()).Panel;
+                using var measurer = new GdiTextMeasurer();
+                PrintService.PrintBatch(this, _doc,
+                    new IReadOnlyDictionary<string, string>?[] { values }, measurer,
+                    direct: panel.Print == "direct", printer: PanelPrinter(panel));
+            };
+        }
+        using var dlg = new PrintLogDialog(this, reprint);
+        dlg.ShowDialog(this);
     }
 
     private void StationExitPrompt()
@@ -1528,7 +1677,7 @@ public sealed class MainForm : Form
             var ff = f;
             if (f.Source == "prompt")
                 inputs.Add(($"field:{f.Name}", () => EmitPrompt(ff)));
-            else if (f.Source == "epicor" && f.Override)
+            else if (f.Source is ("epicor" or "rest") && f.Override)
                 inputs.Add(($"field:{f.Name}", () =>
                 {
                     // overrideable pull: empty box = fetched value (shown as
@@ -1634,7 +1783,7 @@ public sealed class MainForm : Form
                 {
                     case "preview":
                         Btn("Refresh Preview", 110, async () =>
-                            { _sourceFails.Clear(); await RefreshPreviewAsync(template); });
+                            { _sourceFails.Clear(); _listRowFails.Clear(); _listRowSig.Clear(); _listRowSets.Clear(); await RefreshPreviewAsync(template); });
                         break;
                     case "print":
                         Btn(panel.Print == "direct" ? "Print" : "Print…", 90, () =>
@@ -1650,6 +1799,9 @@ public sealed class MainForm : Form
                             Btn($"Print All: {l.Name} ({l.Rows.Count})…", 300,
                                 () => PrintAllRows(template, list));
                         }
+                        break;
+                    case "log":
+                        Btn("Log…", 70, ShowPrintLog);
                         break;
                     case "clear":
                         Btn("Clear", 90, () =>
@@ -1713,6 +1865,181 @@ public sealed class MainForm : Form
     /// (filter-column matches the resolved filter-ref value; empty value =
     /// all rows) and the display text, keeping the current selection when
     /// it survives the filter.</summary>
+    /// <summary>Signature of the row set a query-fed list needs RIGHT NOW
+    /// (query + dataset + resolved target/params/filters), or null while a
+    /// {Field} the query depends on is still empty. Resolution is offline
+    /// (remote:false) — the inputs of a list query are prompts and other
+    /// lists, never remote pulls.</summary>
+    private string? ListQuerySig(EtiqTemplate template, EtiqTemplate.ListDef l,
+                                 out EtiqTemplate.SourceDef? src, out string target,
+                                 out Dictionary<string, string> pars, out Dictionary<string, string> fils)
+    {
+        src = template.Sources.FirstOrDefault(x => x.Name == l.From);
+        target = ""; pars = new(); fils = new();
+        if (src is null) return null;
+        var resolver = new FieldResolver(template, BuildResolveContext(remote: false));
+        bool ready = true;
+        string Val(string raw)
+        {
+            if (!raw.StartsWith('{') || !raw.EndsWith('}')) return raw;
+            try
+            {
+                string v = resolver.Resolve(raw[1..^1]);
+                if (string.IsNullOrWhiteSpace(v)) ready = false;
+                return v;
+            }
+            catch (ResolveException) { ready = false; return ""; }
+        }
+        target = Val(src.Baq ?? src.Query ?? "");
+        pars = src.Params.ToDictionary(kv => kv.Key, kv => Val(kv.Value));
+        fils = src.Filters.ToDictionary(kv => kv.Key, kv => Val(kv.Value));
+        if (!ready || target == "") return null;
+        return src.Name + "\x1f" + (_sessionDataset ?? "") + "\x1f" + target + "\x1f" +
+            string.Join("\x1f", pars.Concat(fils).OrderBy(kv => kv.Key)
+                .Select(kv => kv.Key + "=" + kv.Value));
+    }
+
+    /// <summary>Rows a picker should show: embedded rows, or — for a
+    /// query-fed list — the cached row set for the current signature. A
+    /// missing set starts ONE background fetch; the picker shows empty
+    /// (status line says why) and is rebuilt when the rows land.</summary>
+    private IReadOnlyList<Dictionary<string, string>> RowsFor(EtiqTemplate template, EtiqTemplate.ListDef l, ComboBox cb)
+    {
+        if (l.From is null) return l.Rows;
+        string? sig = ListQuerySig(template, l, out var src, out var target, out var pars, out var fils);
+        string? prevSig = _listRowSig.GetValueOrDefault(l.Name);
+        if (prevSig is not null && prevSig != sig)
+            _listRowSets.Remove(prevSig);   // live inventory: switching away and back = reload, never a stale snapshot
+        _listRowSig[l.Name] = sig;
+        var empty = new List<Dictionary<string, string>>();
+        void Status(string text, bool error = false)
+        {
+            _listNotes[l.Name] = (text, error);
+            if (_dataStatus is null) return;
+            _dataStatus.ForeColor = error ? Color.Firebrick : SystemColors.GrayText;
+            _dataStatus.Text = text;
+        }
+        if (src is null) { Status($"list '{l.Name}': query '{l.From}' is not declared", true); return Live(empty); }
+        if (sig is null) { Status($"{l.Caption ?? l.Name}: waiting for the inputs of query '{src.Name}'"); return Live(empty); }
+        if (_listRowSets.TryGetValue(sig, out var rows))
+        {
+            _listNotes.Remove(l.Name);   // RebuildListItems reports the row count
+            return Live(rows);
+        }
+        // a previous failure for this signature was already reported when
+        // it happened; pickers only rebuild when their inputs change, so
+        // arriving here again (class switched away and back, Refresh) is a
+        // deliberate retry — forget the failure and fetch again
+        _listRowFails.Remove(sig);
+        if (_listRowFetching.Add(sig))
+        {
+            string key = sig;   // non-null copy for the closures below
+            Status($"Loading {l.Caption ?? l.Name}…");
+            string connName = src.Connection, srcName = src.Name;
+            string? ds = src.Dataset ?? ActiveDataset;
+            var listName = l.Name;
+            Task.Run(() =>
+            {
+                try
+                {
+                    var set = FetchListRows(connName, srcName, ds, target, pars, fils);
+                    BeginInvoke(() =>
+                    {
+                        _listRowSets[key] = set;
+                        _listRowFetching.Remove(key);
+                        if (_listCombos.TryGetValue(listName, out var box) && !box.IsDisposed &&
+                            _listRowSig.GetValueOrDefault(listName) == key)
+                        {
+                            RebuildListItems(template, l, box);   // reports the usable row count
+                            _previewTimer?.Stop(); _previewTimer?.Start();   // = Touched()
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    BeginInvoke(() =>
+                    {
+                        _listRowFails[key] = $"list '{listName}': {ex.Message}";
+                        _listRowFetching.Remove(key);
+                        Status(_listRowFails[key], true);
+                    });
+                }
+            });
+        }
+        return Live(empty);
+
+        List<Dictionary<string, string>> Live(List<Dictionary<string, string>> r)
+        {
+            _listRowsLive[l.Name] = r;
+            return r;
+        }
+    }
+
+    /// <summary>Background: every row of a declared query, as strings.
+    /// Runs OFF the UI thread (Task.Run) — connection setup + a 2000-row
+    /// pull can take seconds.</summary>
+    private static List<Dictionary<string, string>> FetchListRows(
+        string connName, string srcName, string? dataset, string target,
+        Dictionary<string, string> pars, Dictionary<string, string> fils)
+    {
+        var conns = ConnectionsStore.Load(ConnectionsPath);
+        var conn = conns.FirstOrDefault(c => c.Name.Equals(connName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException(
+                $"no connection named '{connName}' on this machine (File > Connections… to set it up)");
+        List<Dictionary<string, System.Text.Json.JsonElement>> raw;
+        if (conn.Type.Equals("epicor", StringComparison.OrdinalIgnoreCase))
+        {
+            using var client = new EpicorClient(conn.ToEpicorConfig(dataset));
+            raw = client.FetchSourceRowsAsync(target, pars, fils).GetAwaiter().GetResult();
+        }
+        else if (conn.Type.Equals("glpi", StringComparison.OrdinalIgnoreCase))
+        {
+            if (pars.Count > 0)
+                throw new InvalidOperationException($"query '{srcName}': GLPI list queries take filter-* only (param-id selects ONE item)");
+            using var client = new GlpiClient(conn.ToGlpiConfig(dataset));
+            raw = client.FetchItemRowsAsync(target, fils).GetAwaiter().GetResult();
+        }
+        else
+            throw new InvalidOperationException(
+                $"connection '{conn.Name}' is type '{conn.Type}' — etiq:query needs an epicor or glpi connection");
+        var rows = new List<Dictionary<string, string>>(raw.Count);
+        foreach (var r in raw)
+        {
+            var row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in r)
+                row[k] = v.ValueKind switch
+                {
+                    System.Text.Json.JsonValueKind.String => v.GetString() ?? "",
+                    System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.Undefined => "",
+                    _ => v.ToString(),
+                };
+            rows.Add(row);
+        }
+        return rows;
+    }
+
+    /// <summary>A resolve error prefixed with the live pickers' own status
+    /// (loading / failed / empty) — the resolve error is usually just a
+    /// consequence of that, and would otherwise hide it.</summary>
+    private string WithListNotes(string err)
+    {
+        var notes = _listNotes.Values.Where(n => n.Error || n.Text.Contains("Loading")).Select(n => n.Text).ToList();
+        return notes.Count == 0 ? err : string.Join("  |  ", notes) + "  —  " + err;
+    }
+
+    /// <summary>A picker must be rebuilt when its filter-ref value changed
+    /// (embedded lists) or when the row set its query needs changed
+    /// (query-fed lists — e.g. the item type was switched).</summary>
+    private bool ListNeedsRebuild(EtiqTemplate template, EtiqTemplate.ListDef l, Dictionary<string, string> resolved)
+    {
+        if (l.FilterRef is { } fr && l.FilterColumn is not null &&
+            resolved.GetValueOrDefault(fr) != _listFilterVal.GetValueOrDefault(l.Name))
+            return true;
+        if (l.From is not null)
+            return ListQuerySig(template, l, out _, out _, out _, out _) != _listRowSig.GetValueOrDefault(l.Name);
+        return false;
+    }
+
     private void RebuildListItems(EtiqTemplate template, EtiqTemplate.ListDef l, ComboBox cb)
     {
         string? filterVal = null;
@@ -1723,14 +2050,16 @@ public sealed class MainForm : Form
         }
         _listFilterVal[l.Name] = filterVal;
 
+        var rows = RowsFor(template, l, cb);
         string prevText = cb.Text;
         var map = new Dictionary<string, string>();
         _listDisplayToKey[l.Name] = map;
         cb.BeginUpdate();
         cb.Items.Clear();
-        foreach (var row in l.Rows)
+        int noKey = 0;
+        foreach (var row in rows)
         {
-            if (!row.TryGetValue(l.Key, out var kv)) continue;
+            if (!row.TryGetValue(l.Key, out var kv) || string.IsNullOrWhiteSpace(kv)) { noKey++; continue; }
             if (l.FilterColumn is not null && !string.IsNullOrEmpty(filterVal) &&
                 row.GetValueOrDefault(l.FilterColumn) != filterVal) continue;
             string display = ListRowDisplay(template, l, row, kv);
@@ -1742,6 +2071,22 @@ public sealed class MainForm : Form
             cb.Items.Add(display);
         }
         cb.EndUpdate();
+        if (l.From is not null && _listRowsLive.ContainsKey(l.Name) && !_listRowFetching.Contains(_listRowSig.GetValueOrDefault(l.Name) ?? ""))
+        {
+            // the row count is the honest status for a live picker: "0 of 12
+            // usable" says "your monitors have no inventory numbers", which
+            // no resolve error ever would
+            string note = cb.Items.Count == 0 && rows.Count > 0
+                ? $"{l.Caption ?? l.Name}: {rows.Count} row(s) fetched, none has a '{l.Key}' value — nothing to pick"
+                : noKey > 0
+                    ? $"{l.Caption ?? l.Name}: {cb.Items.Count} row(s) ({noKey} without '{l.Key}' skipped)"
+                    : rows.Count == 0 && _listRowSets.ContainsKey(_listRowSig.GetValueOrDefault(l.Name) ?? "")
+                        ? $"{l.Caption ?? l.Name}: the query returned no rows"
+                        : $"{l.Caption ?? l.Name}: {cb.Items.Count} row(s)";
+            bool warn = cb.Items.Count == 0;
+            if (_listRowSets.ContainsKey(_listRowSig.GetValueOrDefault(l.Name) ?? ""))
+                _listNotes[l.Name] = (note, warn);
+        }
         if (prevText != "" && map.ContainsKey(prevText)) cb.Text = prevText;
         else if (l.Default is { } d && map.ContainsValue(d))
             cb.Text = map.First(kv => kv.Value == d).Key;
@@ -1811,8 +2156,11 @@ public sealed class MainForm : Form
                 : raw;
             var pars = src.Params.ToDictionary(kv => kv.Key, kv => Val(kv.Value));
             var fils = src.Filters.ToDictionary(kv => kv.Key, kv => Val(kv.Value));
+            // the target itself may be field-fed: query="{ItemType}" lets one
+            // template cover Computer / Monitor / Peripheral / Cable …
+            string target = Val(src.Baq ?? src.Query ?? "");
 
-            string sig = sourceName + "\x1f" + (_sessionDataset ?? "") + "\x1f" +
+            string sig = sourceName + "\x1f" + (_sessionDataset ?? "") + "\x1f" + target + "\x1f" +
                 string.Join("\x1f", pars.Concat(fils).OrderBy(kv => kv.Key)
                     .Select(kv => kv.Key + "=" + kv.Value));
             if (!_sourceRows.TryGetValue(sig, out var row))
@@ -1824,7 +2172,8 @@ public sealed class MainForm : Form
                 // "123"…). The box's Leave handler re-runs the preview once
                 // entry commits; a value already fetched (cache hit above)
                 // stays visible regardless of focus.
-                foreach (var raw in src.Params.Values.Concat(src.Filters.Values))
+                foreach (var raw in src.Params.Values.Concat(src.Filters.Values)
+                             .Append(src.Baq ?? src.Query ?? ""))
                 {
                     if (!raw.StartsWith('{') || !raw.EndsWith('}')) continue;
                     string rf = raw[1..^1];
@@ -1839,17 +2188,30 @@ public sealed class MainForm : Form
                     ?? throw new InvalidOperationException(
                         $"no connection named '{src.Connection}' on this machine " +
                         "(File > Connections… to set it up)");
-                if (!conn.Type.Equals("epicor", StringComparison.OrdinalIgnoreCase))
+                bool isEpicor = conn.Type.Equals("epicor", StringComparison.OrdinalIgnoreCase);
+                bool isGlpi = conn.Type.Equals("glpi", StringComparison.OrdinalIgnoreCase);
+                if (!isEpicor && !isGlpi)
                     throw new InvalidOperationException(
-                        $"connection '{conn.Name}' is type '{conn.Type}' — etiq:source baq= needs an epicor connection");
+                        $"connection '{conn.Name}' is type '{conn.Type}' — etiq:query needs an epicor or glpi connection");
                 if (_sourceFails.TryGetValue(sig, out var prevFail))
                     throw new InvalidOperationException(prevFail);   // no auto-retry storm
                 string? ds = src.Dataset ?? ActiveDataset;
-                using var client = new EpicorClient(conn.ToEpicorConfig(ds));
                 try
                 {
-                    row = client.FetchSourceRowAsync(src.Baq ?? src.Query ?? "", pars, fils)
-                        .GetAwaiter().GetResult();
+                    if (isEpicor)
+                    {
+                        using var client = new EpicorClient(conn.ToEpicorConfig(ds));
+                        row = client.FetchSourceRowAsync(target, pars, fils)
+                            .GetAwaiter().GetResult();
+                    }
+                    else
+                    {
+                        // glpi: query= is the item type (Computer, Monitor, …);
+                        // param-id or filter-<column> picks the item
+                        using var client = new GlpiClient(conn.ToGlpiConfig(ds));
+                        row = client.FetchItemRowAsync(target, pars, fils)
+                            .GetAwaiter().GetResult();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -1871,7 +2233,8 @@ public sealed class MainForm : Form
     {
         string counterFile = Path.Combine(Path.GetTempPath(), "etiqedit-preview-counters.json");
         // parsed ONCE per context — the SourceColumn lambda runs per column
-        var tmpl = _doc is not null && _doc.Xml.Descendants(EtiqTemplate.Ns + "source").Any()
+        var tmpl = _doc is not null && (_doc.Xml.Descendants(EtiqTemplate.Ns + "query").Any() ||
+                                        _doc.Xml.Descendants(EtiqTemplate.Ns + "source").Any())
             ? EtiqTemplate.Parse(_doc.Xml.ToString()) : null;
         // captured HERE: Control.Focused must be read on the UI thread, and
         // the resolve may run on a background task
@@ -1882,6 +2245,13 @@ public sealed class MainForm : Form
         {
             PromptValues = _promptBoxes.ToDictionary(kv => kv.Key, kv => kv.Value.Text),
             ListSelections = listOverride ?? CurrentListSelections(),
+            // snapshot: the resolve may run on a background task while a
+            // fetch completion replaces a list's rows on the UI thread
+            ListRows = ((Func<Func<string, IReadOnlyList<Dictionary<string, string>>?>>)(() =>
+            {
+                var snap = _listRowsLive.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<Dictionary<string, string>>)kv.Value);
+                return name => snap.GetValueOrDefault(name);
+            }))(),
             Counters = new LocalFileCounterProvider(counterFile),   // local serials (no Epicor ctx yet)
             EpicorColumn = _ => null,
             Rest = (_, _, _) => null,
@@ -1926,24 +2296,27 @@ public sealed class MainForm : Form
                     return ((Dictionary<string, string>?)null, ex.Message);
                 }
             });
+            // pickers rebuild BEFORE the success check: an empty query-fed
+            // list makes every resolve fail ("no row selected"), and if that
+            // failure skipped the rebuild the picker could never recover
+            // when its inputs changed (class switched away from an empty one)
+            foreach (var l in template.Lists)
+                if (_listCombos.TryGetValue(l.Name, out var cb) &&
+                    ListNeedsRebuild(template, l, resolved ?? new Dictionary<string, string>()))
+                    RebuildListItems(template, l, cb);
             if (resolved is null)
             {
                 if (_dataStatus is not null)
                 {
                     _dataStatus.ForeColor = Color.Firebrick;
-                    _dataStatus.Text = err;
+                    _dataStatus.Text = WithListNotes(err ?? "");
                 }
                 return;
             }
             _canvas.ResolvedValues = resolved;
             _canvas.Invalidate();
-            foreach (var l in template.Lists)
-                if (l.FilterRef is { } fr && l.FilterColumn is not null &&
-                    _listCombos.TryGetValue(l.Name, out var cb) &&
-                    resolved.GetValueOrDefault(fr) != _listFilterVal.GetValueOrDefault(l.Name))
-                    RebuildListItems(template, l, cb);
             foreach (var f in template.Fields)
-                if (f.Source == "epicor" && f.Override &&
+                if (f.Source is ("epicor" or "rest") && f.Override &&
                     _promptBoxes.TryGetValue(f.Name, out var box) &&
                     resolved.TryGetValue(f.Name, out var rv))
                     box.PlaceholderText = rv == "" ? "(from source)" : rv;
@@ -1972,9 +2345,7 @@ public sealed class MainForm : Form
             _canvas.Invalidate();
             // re-filter pickers whose filter-ref value changed with this edit
             foreach (var l in template.Lists)
-                if (l.FilterRef is { } fr && l.FilterColumn is not null &&
-                    _listCombos.TryGetValue(l.Name, out var cb) &&
-                    resolved.GetValueOrDefault(fr) != _listFilterVal.GetValueOrDefault(l.Name))
+                if (_listCombos.TryGetValue(l.Name, out var cb) && ListNeedsRebuild(template, l, resolved))
                     RebuildListItems(template, l, cb);
             if (_dataStatus is not null)
             {
@@ -1985,10 +2356,16 @@ public sealed class MainForm : Form
         }
         catch (ResolveException ex)
         {
+            // same rule as the async path: pickers must be able to recover
+            // from a failing resolve, or an empty list is a dead end
+            foreach (var l in template.Lists)
+                if (_listCombos.TryGetValue(l.Name, out var cb) &&
+                    ListNeedsRebuild(template, l, new Dictionary<string, string>()))
+                    RebuildListItems(template, l, cb);
             if (_dataStatus is not null)
             {
                 _dataStatus.ForeColor = Color.Firebrick;
-                _dataStatus.Text = ex.Message;
+                _dataStatus.Text = WithListNotes(ex.Message);
             }
             return false;
         }
@@ -2194,9 +2571,13 @@ public sealed class NewLabelDialog : Form
         { Minimum = 0.1m, Maximum = 20, DecimalPlaces = 2, Value = 2, Increment = 0.25m };
     private readonly ComboBox _unit = new() { DropDownStyle = ComboBoxStyle.DropDownList };
 
-    public NewLabelDialog()
+    public NewLabelDialog() : this(4, 2, "in", resize: false) { }
+
+    /// <summary>resize=true: "Label Size" flavor — pre-filled with the current
+    /// size, Apply instead of Create.</summary>
+    public NewLabelDialog(double width, double height, string unit, bool resize)
     {
-        Text = "New Label";
+        Text = resize ? "Label Size" : "New Label";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
@@ -2205,12 +2586,19 @@ public sealed class NewLabelDialog : Form
 
         _unit.Items.AddRange(new object[] { "in", "mm" });
         _unit.SelectedIndex = 0;
+        string prevUnit = "in";
         _unit.SelectedIndexChanged += (_, _) =>
         {
             bool mm = Unit == "mm";
+            if (Unit == prevUnit) return;
+            // CONVERT the entered size, never reset it
+            decimal f = mm ? 25.4m : 1m / 25.4m;
+            decimal w = Math.Round(_w.Value * f, 2), h = Math.Round(_h.Value * f, 2);
             _w.Maximum = mm ? 500 : 20; _h.Maximum = mm ? 500 : 20;
-            _w.Value = mm ? 100 : 4; _h.Value = mm ? 50 : 2;
             _w.Increment = mm ? 1 : 0.25m; _h.Increment = mm ? 1 : 0.25m;
+            _w.Value = Math.Clamp(w, _w.Minimum, _w.Maximum);
+            _h.Value = Math.Clamp(h, _h.Minimum, _h.Maximum);
+            prevUnit = Unit;
         };
 
         Controls.Add(new Label { Text = "Width:", Left = 12, Top = 15, AutoSize = true });
@@ -2220,7 +2608,16 @@ public sealed class NewLabelDialog : Form
         Controls.Add(new Label { Text = "Units:", Left = 12, Top = 79, AutoSize = true });
         _unit.SetBounds(80, 76, 90, 24); Controls.Add(_unit);
 
-        var ok = new Button { Text = "Create", DialogResult = DialogResult.OK };
+        if (unit == "mm")
+        {
+            _w.Maximum = 500; _h.Maximum = 500; _w.Increment = 1; _h.Increment = 1;
+            prevUnit = "mm";
+            _unit.SelectedItem = "mm";   // handler sees Unit == prevUnit → no conversion
+        }
+        _w.Value = (decimal)Math.Clamp(width, (double)_w.Minimum, (double)_w.Maximum);
+        _h.Value = (decimal)Math.Clamp(height, (double)_h.Minimum, (double)_h.Maximum);
+
+        var ok = new Button { Text = resize ? "Apply" : "Create", DialogResult = DialogResult.OK };
         ok.SetBounds(80, 112, 80, 28); Controls.Add(ok);
         var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel };
         cancel.SetBounds(168, 112, 80, 28); Controls.Add(cancel);

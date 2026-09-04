@@ -40,6 +40,11 @@ public sealed class EtiqTemplate
     {
         public string? Value => (string?)El.Attribute("value");
         public string? Ref => (string?)El.Attribute("ref");
+        /// <summary>split="delim" part="N": keep the N-th delimited piece
+        /// (0-based; negative counts from the end: -1 = last, -2 = the one
+        /// before). Runs BEFORE start/len. Missing part = empty.</summary>
+        public string? Split => (string?)El.Attribute("split");
+        public string? Part => (string?)El.Attribute("part");
         public string? Start => (string?)El.Attribute("start");
         public string? Len => (string?)El.Attribute("len");
         public string? Format => (string?)El.Attribute("format");
@@ -104,12 +109,18 @@ public sealed class EtiqTemplate
         /// sparse (empty cells carry no attribute), so order cannot be
         /// derived from row attributes reliably; this attribute is the
         /// truth when present.</summary>
+        /// <summary>from="QueryName": rows come from a declared etiq:query
+        /// (ALL its result rows) instead of embedded etiq:row elements — a
+        /// picker over a live inventory. The selected row then feeds
+        /// source="list" fields exactly like an embedded row.</summary>
+        public string? From => (string?)El.Attribute("from");
         public string[]? Columns => ((string?)El.Attribute("columns"))
             ?.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         public List<Dictionary<string, string>> Rows { get; } = new();
 
-        public Dictionary<string, string>? RowByKey(string keyValue) =>
-            Rows.FirstOrDefault(r => r.GetValueOrDefault(Key) == keyValue);
+        public Dictionary<string, string>? RowByKey(string keyValue) => RowByKey(Rows, keyValue);
+        public Dictionary<string, string>? RowByKey(IEnumerable<Dictionary<string, string>> rows, string keyValue) =>
+            rows.FirstOrDefault(r => r.GetValueOrDefault(Key) == keyValue);
     }
 
     /// <summary>A declared remote data source (convention 0.2+ "Sources"):
@@ -288,7 +299,10 @@ public sealed class EtiqTemplate
         foreach (var m in doc.Descendants(Ns + "map"))
             Maps.Add(new MapDef(m));
 
-        foreach (var src in doc.Descendants(Ns + "source"))
+        // etiq:query is the documented name (a parameterized read-only
+        // fetch); etiq:source was the 0.7.0 spelling and parses forever
+        foreach (var src in doc.Descendants(Ns + "query")
+                     .Concat(doc.Descendants(Ns + "source")))
             Sources.Add(new SourceDef(src));
 
         Panel = new PanelDef(doc.Descendants(Ns + "panel").FirstOrDefault());

@@ -47,14 +47,14 @@ public static class TemplateValidator
         foreach (var src in t.Sources)
         {
             if (src.Name == "")
-                { Err("source-name", "etiq:source with empty/missing name"); continue; }
+                { Err("source-name", "etiq:query with empty/missing name"); continue; }
             if (!sourcesByName.TryAdd(src.Name, src))
                 Err("source-dup", $"source '{src.Name}' declared more than once");
             if (src.Connection == "")
                 Err("source-conn", $"source '{src.Name}': connection= is required (a NAMED machine connection — never credentials or URLs in the template)");
             if (string.IsNullOrWhiteSpace(src.Baq) && string.IsNullOrWhiteSpace(src.Query))
-                Err("source-baq", $"source '{src.Name}': baq= (or query=) is required");
-            if (src.Params.Count == 0 && src.Filters.Count == 0)
+                Err("source-baq", $"source '{src.Name}': baq= (epicor) or query= (glpi item type, e.g. Computer) is required");
+            if (src.Params.Count == 0 && src.Filters.Count == 0 && !t.Lists.Any(l => l.From == src.Name))
                 Warn("source-open", $"source '{src.Name}': no param-/filter- attributes — every fetch pulls the WHOLE result set");
         }
 
@@ -72,8 +72,8 @@ public static class TemplateValidator
                 if (p.ButtonsAt is not ("bottom" or "top"))
                     Err("panel-buttons", $"etiq:panel buttons-at='{p.ButtonsAt}' — must be bottom|top");
                 foreach (var b in p.Buttons)
-                    if (b is not ("preview" or "print" or "printall" or "clear"))
-                        Err("panel-buttons", $"etiq:panel buttons: unknown '{b}' (preview|print|printall|clear)");
+                    if (b is not ("preview" or "print" or "printall" or "clear" or "log"))
+                        Err("panel-buttons", $"etiq:panel buttons: unknown '{b}' (preview|print|printall|clear|log)");
                 if (p.Printer is not null && p.Print != "direct")
                     Warn("panel-printer", "etiq:panel printer= only applies with print='direct'");
                 // printer="embedded" is the on-form picker; any other value is a printer NAME
@@ -109,6 +109,16 @@ public static class TemplateValidator
                 Err("list-dup", $"list '{l.Name}' declared more than once");
             if (l.Key == "")
                 { Err("list-key", $"list '{l.Name}': key= (the selector column) is required"); continue; }
+            if (l.From is { } lf)
+            {
+                if (!sourcesByName.ContainsKey(lf))
+                    Err("list-from", $"list '{l.Name}': from='{lf}' names no declared etiq:query");
+                if (l.Rows.Count > 0)
+                    Warn("list-from", $"list '{l.Name}': embedded etiq:row elements are ignored when from= is set");
+                if (l.FilterColumn is not null)
+                    Warn("list-from", $"list '{l.Name}': filter-column applies to the fetched rows (fine) — but consider filter-* on the query to fetch less");
+                continue;   // rows/keys/default are only known at run time
+            }
             if (l.Rows.Count == 0)
                 Err("list-rows", $"list '{l.Name}': needs at least one etiq:row");
             var keys = new HashSet<string>();
@@ -146,10 +156,10 @@ public static class TemplateValidator
                     if (string.IsNullOrWhiteSpace(f.Column))
                         Err("field-epicor", $"field '{f.Name}': source=epicor requires column=");
                     if (f.From is not null && !sourcesByName.ContainsKey(f.From))
-                        Err("field-from", $"field '{f.Name}': from='{f.From}' names no declared etiq:source");
+                        Err("field-from", $"field '{f.Name}': from='{f.From}' names no declared etiq:query");
                     break;
             }
-            if (f.Override && f.Source != "epicor")
+            if (f.Override && f.Source is not ("epicor" or "rest"))
                 Warn("field-override", $"field '{f.Name}': override= has no effect on source={f.Source}");
             switch (f.Source)
             {
@@ -161,6 +171,15 @@ public static class TemplateValidator
                     Err("field-auto", $"field '{f.Name}': source=auto requires value= (e.g. date:dd-MMM-yyyy)"); break;
                 case "prompt" when string.IsNullOrWhiteSpace(f.Caption):
                     Warn("prompt-caption", $"field '{f.Name}': prompt without caption= (operator sees a blank prompt)"); break;
+                case "rest" when f.From is not null:
+                    // declared-query form: from= + column= (like epicor)
+                    if (!sourcesByName.ContainsKey(f.From))
+                        Err("field-from", $"field '{f.Name}': from='{f.From}' names no declared etiq:query");
+                    if (string.IsNullOrWhiteSpace(f.Column))
+                        Err("field-rest", $"field '{f.Name}': source=rest with from= requires column=");
+                    if (f.Connection is not null || f.Pick is not null)
+                        Warn("field-rest", $"field '{f.Name}': connection=/pick= are ignored when from= names a declared query");
+                    break;
                 case "rest":
                     if (string.IsNullOrWhiteSpace(f.Connection))
                         Err("field-rest", $"field '{f.Name}': source=rest requires connection= (a named profile)");
@@ -260,15 +279,19 @@ public static class TemplateValidator
         // --- source param/filter field references (needs full field table) ---
         foreach (var src in t.Sources)
         {
-            foreach (var (kind, dict) in new[] { ("param", src.Params), ("filter", src.Filters) })
+            var targetRef = new Dictionary<string, string>();
+            if (src.Baq is { } bq) targetRef["baq"] = bq;
+            if (src.Query is { } qy) targetRef["query"] = qy;
+            foreach (var (kind, dict) in new[] { ("param", src.Params), ("filter", src.Filters), ("", targetRef) })
                 foreach (var (key, val) in dict)
                 {
                     if (!val.StartsWith('{') || !val.EndsWith('}')) continue;   // literal
                     string rf = val[1..^1];
+                    string attr = kind == "" ? key : $"{kind}-{key}";
                     if (!byName.TryGetValue(rf, out var pf))
-                        { Err("source-ref", $"source '{src.Name}': {kind}-{key} references undeclared field '{rf}'"); continue; }
-                    if (pf.Source == "epicor" && pf.From == src.Name)
-                        Err("source-cycle", $"source '{src.Name}': {kind}-{key} references field '{rf}' which reads FROM this source (circular)");
+                        { Err("source-ref", $"source '{src.Name}': {attr} references undeclared field '{rf}'"); continue; }
+                    if (pf.Source is ("epicor" or "rest") && pf.From == src.Name)
+                        Err("source-cycle", $"source '{src.Name}': {attr} references field '{rf}' which reads FROM this source (circular)");
                 }
         }
 
@@ -295,7 +318,8 @@ public static class TemplateValidator
                     // a line break carries nothing else
                     if (s.Value is not null || s.Ref is not null || s.Sep is not null ||
                         s.Map is not null || s.Format is not null || s.Pad is not null ||
-                        s.Start is not null || s.Len is not null || s.Case is not null)
+                        s.Start is not null || s.Len is not null || s.Case is not null ||
+                        s.Split is not null || s.Part is not null)
                         Err("seg-newline", $"{loc}: newline=\"true\" must be the segment's only attribute");
                     continue;
                 }
@@ -311,6 +335,12 @@ public static class TemplateValidator
                 }
                 if (s.Pad is not null && !PadRx.IsMatch(s.Pad))
                     Err("seg-pad", $"{loc}: pad='{s.Pad}' must be side:char:width (e.g. left:0:6)");
+                if (s.Part is not null && s.Split is null)
+                    Err("seg-split", $"{loc}: part= needs split=");
+                if (s.Split is not null && s.Split == "")
+                    Err("seg-split", $"{loc}: split= must not be empty");
+                if (s.Part is not null && EtiqTemplate.ParseNum(s.Part) is null)
+                    Err("seg-split", $"{loc}: part= must be an integer (negative counts from the end)");
                 if (s.Start is not null && (EtiqTemplate.ParseNum(s.Start) is not (>= 0)))
                     Err("seg-substr", $"{loc}: start= must be a non-negative number");
                 if (s.Len is not null && (EtiqTemplate.ParseNum(s.Len) is not (>= 0)))

@@ -207,10 +207,13 @@ Source kinds:
   are configuration, never template content; `query` is the
   endpoint/parameters; `pick` selects one value from the JSON response
   as a **dotted path with optional index** (`assets[0].name`) — a closed
-  selector, deliberately not JSONPath-the-language. First planned
-  profile: GLPI (App-Token + Session-Token). `epicor` predates this and
-  stays a first-class kind; it may become a built-in `rest` profile
-  internally. `on-fail` applies to `rest` exactly as to `epicor`.
+  selector, deliberately not JSONPath-the-language. **With `from=`** the
+  field instead reads one `column` of a **declared query** on a non-Epicor
+  connection (today: GLPI — see "Declared queries"); `connection`/`pick`
+  are then ignored, and `override="true"` works as for `epicor`. `epicor`
+  predates this and stays a first-class kind; it may become a built-in
+  `rest` profile internally. `on-fail` applies to `rest` exactly as to
+  `epicor`.
 - `prompt` — operator input at print time (caption, mask, default)
 
 Any non-compose field may additionally carry
@@ -264,14 +267,19 @@ Validator: unknown `source` values are errors; reserved-but-unimplemented
 kinds validate structurally but fail at print time with "not yet
 implemented".
 
-## Declared sources (multi-BAQ fetches)
+## Declared queries (multi-BAQ fetches)
 
-A template may declare any number of **sources** — one remote fetch each,
-yielding one row whose columns any number of fields consume:
+A template may declare any number of **queries** — parameterized,
+read-only remote fetches, one row each, whose columns any number of
+fields consume. (The element shipped in 0.7.0 spelled `etiq:source`;
+that spelling parses forever. `etiq:query` is the name from the next
+release on — "source" already means a field's value-kind, and queries
+are strictly read-only, unlike the planned `etiq:series` transactions.
+See docs/series.md.)
 
 ```xml
-<etiq:source name="LotInfo" connection="Epicor" baq="MFG-LotLabel"
-             param-LotNum="{LotNum}" filter-Plant="MfgSys"/>
+<etiq:query name="LotInfo" connection="Epicor" baq="MFG-LotLabel"
+            param-LotNum="{LotNum}" filter-Plant="MfgSys"/>
 <etiq:field name="PartNo" source="epicor" from="LotInfo" column="JobHead_PartNum"/>
 <etiq:field name="PartDesc" source="epicor" from="LotInfo" column="JobHead_PartDescription"/>
 ```
@@ -287,12 +295,94 @@ yielding one row whose columns any number of fields consume:
   OData `$filter` equality terms (the name must be a result column —
   alias-prefixed). A value of `{FieldName}` resolves that field first
   (prompts, lists, even another source); anything else is a literal.
-- One HTTP call per source per label, first row wins. A source whose
+- One HTTP call per query per label, first row wins. A query whose
   field-fed values are still empty (or mid-entry) does not fetch.
-- Validation: sources need `name`/`connection`/`baq`; `from=` must name a
-  declared source; `{Field}` references must exist and must not create a
-  cycle; a source with no params/filters warns (it would pull the whole
-  BAQ).
+- Validation: queries need `name`/`connection` and `baq` or `query`;
+  `from=` must name a declared query; `{Field}` references must exist and
+  must not create a cycle; a query with no params/filters warns (it would
+  pull the whole result set).
+
+### Query-fed pick lists
+
+An `etiq:list` may take its rows from a declared query instead of
+embedded `etiq:row` elements — `from="QueryName"` — turning a live
+inventory into a picker. The query runs with **no** row limit intent
+(all rows, paged; capped at 2000) whenever its `{Field}` inputs change,
+and the chosen row feeds `source="list"` fields exactly like an embedded
+row:
+
+```xml
+<etiq:query name="Inventory" connection="GLPI" query="{ItemType}"/>
+<etiq:list  name="Assets" key="otherserial" from="Inventory" caption="Asset:"/>
+<etiq:field name="Name"     source="list" list="Assets" column="name"/>
+<etiq:field name="Location" source="list" list="Assets" column="location"/>
+```
+
+- `key=` names the fetched column the operator selects by (here the
+  inventory number); `display=`, `caption=`, `filter-column`/`filter-ref`
+  work as for embedded lists. `default=` is not validated (rows are only
+  known at run time). Embedded rows are ignored (warning).
+- A query consumed by a list does not get the "open query" warning —
+  listing the whole set is the point. `filter-*` still narrows the fetch
+  server-side (GLPI: substring search).
+- The editor fetches in the background, shows the loading state on the
+  data-panel status line, and rebuilds the picker when rows arrive. The
+  data is live: any change of the query's inputs (switching the class
+  away and back included) and **Refresh Preview** fetch again; a failed
+  fetch is reported once and retried the same way.
+  Declare a list's input lists (e.g. the class picker) BEFORE it.
+- `etiq resolve` (CLI) has no fetch for these lists: fields reading a
+  query-fed list report "rows not loaded" in a dry run.
+
+### GLPI queries
+
+A query on a connection of type `glpi` (File → Connections…: API endpoint
+`…/apirest.php`, App-Token, user token) fetches ONE asset from the GLPI
+inventory. `query=` is the **item type** (`Computer`, `Monitor`,
+`NetworkEquipment`, `Peripheral`, `Phone`, `Printer`, or any other
+itemtype the API exposes); `baq=` has no meaning here.
+
+```xml
+<etiq:query name="Asset" connection="GLPI" query="Computer" filter-serial="{Serial}"/>
+<etiq:field name="Serial"   source="prompt" caption="Serial:" required="true"/>
+<etiq:field name="Name"     source="rest" from="Asset" column="name" override="true"/>
+<etiq:field name="Inv"      source="rest" from="Asset" column="otherserial"/>
+<etiq:field name="Location" source="rest" from="Asset" column="locations_id"/>
+```
+
+- `query=` (like `baq=`) may itself be `{FieldName}` — typically a pick
+  list of item types — so one template covers every asset class; the QR
+  URL then composes `front/` + the type's page name + `.form.php?id=`
+  (see `examples/glpi-asset-tag.svg`).
+- Addressing: `param-id="{AssetId}"` reads `/{itemtype}/{id}` directly;
+  otherwise `filter-<column>` values become GLPI `searchText` terms
+  (`serial`, `otherserial` = inventory number, `name`, `contact`, …).
+  GLPI's search is a substring match, so the engine narrows the hits to
+  rows whose filtered columns match **exactly** (case-insensitive) and
+  takes the first. `id` is the only `param-` GLPI understands (item types
+  have no BAQ-style parameters) — anything else is an error, never a
+  silent ignore. A query whose id and every filter are empty refuses to
+  run (it would list the whole inventory).
+- Columns are GLPI's own field names. Dropdown foreign keys
+  (`locations_id`, `states_id`, `manufacturers_id`, `computermodels_id`,
+  `users_id`, `entities_id`, …) arrive **expanded** to their display
+  names, so a label prints "Building A > Room 12", not `17`.
+- Datasets work as for Epicor (e.g. a `test` dataset overriding `baseUrl`
+  for a staging GLPI); the tokens are secrets and never enter templates.
+- List fetches skip GLPI item **templates** (`is_template`) and
+  soft-deleted items (`is_deleted`) — neither is a thing to tag.
+- **Virtual columns** (GLPI rows only): GLPI names its model/type
+  dropdowns per class (`computermodels_id`, `monitormodels_id`,
+  `peripheraltypes_id`, …). Every fetched row also carries `model`, `type`
+  and `manufacturer` aliasing whichever is present, `location` = the
+  leaf of the expanded location path ("Site > Bldg A > Room 12" →
+  "Room 12") and `location_parent` the level above it — conveniences
+  only: `locations_id` keeps the full path, and any level of it is a
+  compose seg with `split=" > " part="-2"` (see Composed fields). One
+  template thus fits every class.
+- The GLPI item's URL for a QR code is composed, not fetched:
+  `<etiq:seg value="https://glpi.example.local/front/computer.form.php?id="/>`
+  followed by `<etiq:seg ref="Id"/>` (with `Id` reading `column="id"`).
 
 ## Data-panel presentation (etiq:panel)
 
@@ -319,9 +409,11 @@ form without touching the fields themselves:
 - `order` — explicit input order on the panel: comma list of
   `field:Name` / `list:Name` tokens; unlisted inputs follow in
   declaration order. (Edited with Move Up/Down on F4's Panel tab.)
-- `buttons` — comma list of `preview`, `print`, `printall`, `clear`
-  (default: all), in display order; `buttons-at` = `bottom` (default) |
-  `top`.
+- `buttons` — comma list of `preview`, `print`, `printall`, `clear`,
+  `log` (default: all but `log`), in display order; `buttons-at` =
+  `bottom` (default) | `top`. `log` opens the print-log viewer (with
+  reprint); without it, station mode still reaches the viewer through
+  the deliberate Ctrl+Shift+L chord.
 - Individual inputs opt out with `panel="hide"` on the field or list —
   the field still resolves; it just takes no operator input.
 
@@ -362,11 +454,12 @@ Per-segment transforms, applied in this fixed order:
 
 | attribute | meaning |
 |---|---|
+| `split`, `part` | keep one delimited piece: `split=" > " part="-2"` on "Site > Bldg A > Room 12" → `Bldg A` (0-based; negative counts from the end, `-1` = last; default `-1`; a missing piece is empty, never an error) |
 | `start`, `len` | substring (0-based; clamped, never errors) |
 | `format` | same formats as `data-format` (`date:…`, `number:…`) |
 | `case` | `normal` \| `upper` \| `lower` \| `title` (`normal` = no-op) |
 | `pad` | `side:char:width`, e.g. `pad="left:0:6"` |
-| `map`, `default` | lookup table (below); `default` when no row matches |
+| `map`, `default` | lookup table (below); `default` when no row matches — an ABSENT default blocks the print, `default=""` explicitly falls back to blank (the dialogs spell that `""`; a leading `\` escapes, so `\""` is the literal text `""`) |
 | `sep` | smart separator: emitted **before** this segment's content, but only when the segment resolved non-empty **and** the current line already has content — so a blank State never leaves `City, ` dangling |
 
 ### Variant composition (conditional segment lists)
@@ -604,7 +697,9 @@ Added in 0.2:
   `data-height`; `data-width` box (per justification) must fit within
   label bounds
 - `rest` fields: `connection` resolves to a defined profile; `pick`
-  parses as dotted-path-with-index (nothing else)
+  parses as dotted-path-with-index (nothing else) — or, with `from=`,
+  the query exists and `column` is present (`connection`/`pick` warn as
+  ignored)
 - lists: unique non-empty names; `key=` required, present and unique on
   every row; at least one row; `default=` matches a row. `list` fields:
   `list=` resolves, `column=` present on at least one row (warning when

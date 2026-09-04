@@ -41,6 +41,7 @@ public sealed class MetadataDialog : Form
     private readonly ListBox _mapList = new() { Dock = DockStyle.Fill };
     private readonly TextBox _mapName = new() { Width = 180 };
     private readonly TextBox _mapDefault = new() { Width = 380 };
+    private readonly CheckBox _mapBlank = new() { Text = "blank", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly DataGridView _whenGrid = GridTools.NewGrid();
 
     // lists tab
@@ -49,6 +50,7 @@ public sealed class MetadataDialog : Form
     private readonly TextBox _listCaption = new() { Width = 220 };
     private readonly TextBox _listKey = new() { Width = 100 };
     private readonly TextBox _listDefault = new() { Width = 120 };
+    private readonly TextBox _listFrom = new() { Width = 160 };
     private readonly ComboBox _listDisplay = new()
         { Width = 170, DropDownStyle = ComboBoxStyle.DropDown };
     private readonly TextBox _listFilterCol = new() { Width = 110 };
@@ -63,6 +65,7 @@ public sealed class MetadataDialog : Form
     private readonly TextBox _srcConn = new() { Width = 160 };
     private readonly TextBox _srcDataset = new() { Width = 160 };
     private readonly TextBox _srcBaq = new() { Width = 240 };
+    private readonly TextBox _srcQuery = new() { Width = 240 };
     private readonly DataGridView _srcArgGrid = GridTools.NewGrid();
 
     // panel tab (data-mode presentation)
@@ -81,10 +84,16 @@ public sealed class MetadataDialog : Form
 
     private XElement? _curMap, _curList, _curSrc;   // elements the grids currently show
 
-    public MetadataDialog(EditorDoc doc, Action<XElement>? apply = null)
+    /// <summary>Sample values per field name for the compose preview: the
+    /// canvas's last resolved values, else the elements' design-time text.</summary>
+    private readonly IReadOnlyDictionary<string, string>? _samples;
+
+    public MetadataDialog(EditorDoc doc, Action<XElement>? apply = null,
+                          IReadOnlyDictionary<string, string>? samples = null)
     {
         _doc = doc;
         _apply = apply;
+        _samples = samples;
         Result = doc.GetOrCreateEtiqLabelClone();
         _appliedSnapshot = new XElement(Result);
 
@@ -268,9 +277,41 @@ public sealed class MetadataDialog : Form
             .Select(f => (string?)f.Attribute("name"))
             .Where(n => !string.IsNullOrEmpty(n) && n != self)
             .Select(n => n!);
-        using var dlg = new ComposeDialog(_curField, candidates);
+        using var dlg = new ComposeDialog(_curField, candidates, PreviewCompose);
         dlg.ShowDialog(this);
         UpdateComposeUi();
+    }
+
+    /// <summary>Resolve one compose field (a scratch copy from the dialog)
+    /// against the working label, with every NON-compose field pinned to
+    /// its sample value — so lists, prompts and remote pulls preview
+    /// without touching the network. Maps stay live. Throws with the
+    /// resolver's message on a broken definition.</summary>
+    private string PreviewCompose(XElement tmpField)
+    {
+        string name = (string?)tmpField.Attribute("name") ?? "";
+        var label = new XElement(Result);
+        var existing = label.Elements(NS + "field")
+            .FirstOrDefault(f => (string?)f.Attribute("name") == name);
+        if (existing is not null) existing.ReplaceWith(new XElement(tmpField));
+        else label.Add(new XElement(tmpField));
+        foreach (var f in label.Elements(NS + "field").ToList())
+        {
+            if ((string?)f.Attribute("source") == "compose") continue;
+            string fn = (string?)f.Attribute("name") ?? "";
+            f.ReplaceWith(new XElement(NS + "field",
+                new XAttribute("name", fn),
+                new XAttribute("source", "fixed"),
+                new XAttribute("value", _samples?.GetValueOrDefault(fn) ?? "")));
+        }
+        XNamespace svg = "http://www.w3.org/2000/svg";
+        var root = new XElement(svg + "svg",
+            new XAttribute("width", "1in"), new XAttribute("height", "1in"),
+            new XAttribute("viewBox", "0 0 1000 1000"),
+            new XElement(svg + "metadata", label));
+        var t = EtiqTemplate.Parse(root.ToString());
+        try { return new FieldResolver(t, new ResolveContext()).Resolve(name); }
+        catch (ResolveException ex) { return "⚠ " + ex.Message; }
     }
 
     private void AddField()
@@ -307,9 +348,18 @@ public sealed class MetadataDialog : Form
         right.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         right.Controls.Add(new Label { Text = "Name", TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill }, 0, 0);
+        _mapName.Dock = DockStyle.Fill;
+        _mapName.Margin = new Padding(2, 4, 8, 2);
+        _mapDefault.Width = 260; _mapDefault.Margin = new Padding(2, 4, 4, 2);
+        var mapDflWrap = new FlowLayoutPanel { WrapContents = false, Dock = DockStyle.Fill, Margin = new Padding(0) };
+        mapDflWrap.Controls.Add(_mapDefault); mapDflWrap.Controls.Add(_mapBlank);
+        _mapBlank.Margin = new Padding(6, 8, 0, 0);
+        _mapBlank.CheckedChanged += (_, _) => _mapDefault.Enabled = !_mapBlank.Checked;
+        new ToolTip().SetToolTip(_mapDefault,
+            "Result when no row matches. Empty = NO default (unmatched blocks the print); tick blank to fall back to empty.");
         right.Controls.Add(_mapName, 1, 0);
         right.Controls.Add(new Label { Text = "Default", TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill }, 0, 1);
-        right.Controls.Add(_mapDefault, 1, 1);
+        right.Controls.Add(mapDflWrap, 1, 1);
         right.Controls.Add(_whenGrid, 0, 2);
         right.SetColumnSpan(_whenGrid, 2);
 
@@ -352,7 +402,10 @@ public sealed class MetadataDialog : Form
         _curMap = _mapList.SelectedItem as XElement;
         _whenGrid.Rows.Clear();
         _mapName.Text = (string?)_curMap?.Attribute("name") ?? "";
-        _mapDefault.Text = (string?)_curMap?.Attribute("default") ?? "";
+        string? mapDflt = (string?)_curMap?.Attribute("default");
+        _mapBlank.Checked = mapDflt == "";
+        _mapDefault.Text = mapDflt is null or "" ? "" : mapDflt;
+        _mapDefault.Enabled = !_mapBlank.Checked;
         if (_curMap is null) return;
         foreach (var w in _curMap.Elements(NS + "when"))
         {
@@ -368,7 +421,8 @@ public sealed class MetadataDialog : Form
     {
         if (_curMap is null) return;
         if (_mapName.Text.Trim() is { Length: > 0 } nm) _curMap.SetAttributeValue("name", nm);
-        _curMap.SetAttributeValue("default", _mapDefault.Text == "" ? null : _mapDefault.Text);
+        _curMap.SetAttributeValue("default",
+            _mapBlank.Checked ? "" : _mapDefault.Text == "" ? null : _mapDefault.Text);
         _curMap.Elements(NS + "when").Remove();
         foreach (DataGridViewRow row in _whenGrid.Rows)
         {
@@ -389,10 +443,10 @@ public sealed class MetadataDialog : Form
     {
         var page = new TabPage("Lists");
 
-        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7 };
+        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 8 };
         right.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
         right.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (int i = 0; i < 5; i++) right.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        for (int i = 0; i < 6; i++) right.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         right.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
         right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         void Row(int r, string label, Control c)
@@ -400,6 +454,8 @@ public sealed class MetadataDialog : Form
             right.Controls.Add(new Label { Text = label, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill }, 0, r);
             right.Controls.Add(c, 1, r);
         }
+        foreach (var c in new Control[] { _listName, _listCaption, _listDisplay })
+        { c.Dock = DockStyle.Fill; c.Margin = new Padding(2, 4, 8, 2); }
         Row(0, "Name", _listName);
         Row(1, "Data panel caption", _listCaption);
 
@@ -418,6 +474,15 @@ public sealed class MetadataDialog : Form
         filterRow.Controls.Add(new Label { Text = " equals field", AutoSize = true, Anchor = AnchorStyles.Left });
         filterRow.Controls.Add(_listFilterRef);
         Row(4, "Filter rows where", filterRow);
+
+        var fromRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
+        fromRow.Controls.Add(_listFrom);
+        fromRow.Controls.Add(new Label
+        {
+            Text = "  (query-fed picker: ALL rows of that etiq:query; embedded rows below are ignored)",
+            AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText,
+        });
+        Row(5, "Rows from query", fromRow);
 
         // columns: add / remove / reorder (order = row grid + display order)
         var colPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
@@ -446,9 +511,9 @@ public sealed class MetadataDialog : Form
         ColBtn("Move Up", () => MoveColumn(-1));
         ColBtn("Move Down", () => MoveColumn(+1));
         colPanel.Controls.Add(colBtns);
-        Row(5, "Columns", colPanel);
+        Row(6, "Columns", colPanel);
 
-        right.Controls.Add(_rowGrid, 0, 6);
+        right.Controls.Add(_rowGrid, 0, 7);
         right.SetColumnSpan(_rowGrid, 2);
 
         page.Controls.Add(SplitPage(_listList, right,
@@ -501,6 +566,7 @@ public sealed class MetadataDialog : Form
         _listCaption.Text = (string?)_curList?.Attribute("caption") ?? "";
         _listKey.Text = (string?)_curList?.Attribute("key") ?? "";
         _listDefault.Text = (string?)_curList?.Attribute("default") ?? "";
+        _listFrom.Text = (string?)_curList?.Attribute("from") ?? "";
         _listDisplay.Text = (string?)_curList?.Attribute("display") ?? "";
         _listFilterCol.Text = (string?)_curList?.Attribute("filter-column") ?? "";
         _listFilterRef.Text = (string?)_curList?.Attribute("filter-ref") ?? "";
@@ -561,6 +627,7 @@ public sealed class MetadataDialog : Form
         if (_listName.Text.Trim() is { Length: > 0 } nm) _curList.SetAttributeValue("name", nm);
         _curList.SetAttributeValue("key", _listKey.Text == "" ? null : _listKey.Text);
         _curList.SetAttributeValue("default", _listDefault.Text == "" ? null : _listDefault.Text);
+        _curList.SetAttributeValue("from", _listFrom.Text.Trim() is { Length: > 0 } lfrom ? lfrom : null);
         _curList.SetAttributeValue("caption", _listCaption.Text.Trim() is { Length: > 0 } cap ? cap : null);
         _curList.SetAttributeValue("display", _listDisplay.Text.Trim() is { Length: > 0 } dsp ? dsp : null);
         _curList.SetAttributeValue("filter-column", _listFilterCol.Text.Trim() is { Length: > 0 } fc ? fc : null);
@@ -601,7 +668,7 @@ public sealed class MetadataDialog : Form
 
     private TabPage BuildSourcesTab()
     {
-        var page = new TabPage("Sources");
+        var page = new TabPage("Queries");
         _srcArgGrid.Columns.Add(NewComboCol("Kind", "param", "filter"));
         _srcArgGrid.Columns.Add("Name", "Name");
         _srcArgGrid.Columns.Add("Value", "Value");
@@ -618,11 +685,16 @@ public sealed class MetadataDialog : Form
         Row(38, "Connection", _srcConn);
         Row(68, "Dataset pin", _srcDataset);
         Row(98, "BAQ", _srcBaq);
+        Row(128, "Item type", _srcQuery);
+        var tips = new ToolTip();
+        tips.SetToolTip(_srcBaq, "epicor connections: the BAQ id");
+        tips.SetToolTip(_srcQuery, "glpi connections: the item type (Computer, Monitor, NetworkEquipment, Printer, …)");
         var hint = new Label
         {
             Text = "Params/filters — Value is a literal, or {FieldName} to feed a field's " +
-                   "resolved value in. Fields consume this source via From + Column.",
-            Left = 6, Top = 128, AutoSize = false, Height = 34,
+                   "resolved value in. Fields consume this query via From + Column. " +
+                   "Epicor: param-<BAQ parameter>, filter-<display column>. GLPI: param-id, or filter-<column> (serial, otherserial, name…).",
+            Left = 6, Top = 158, AutoSize = false, Height = 66,
             ForeColor = SystemColors.GrayText,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
@@ -632,7 +704,7 @@ public sealed class MetadataDialog : Form
         right.Resize += (_, _) =>
         {
             hint.Width = right.Width - 12;
-            _srcArgGrid.SetBounds(6, 166, right.Width - 12, right.Height - 172);
+            _srcArgGrid.SetBounds(6, 230, right.Width - 12, right.Height - 236);
         };
 
         page.Controls.Add(SplitPage(_srcList, right,
@@ -653,8 +725,8 @@ public sealed class MetadataDialog : Form
     private void AddSource()
     {
         CommitSource();
-        var el = new XElement(NS + "source",
-            new XAttribute("name", UniqueName("Source", "source")),
+        var el = new XElement(NS + "query",
+            new XAttribute("name", UniqueName("Query", "query")),
             new XAttribute("connection", ""));
         Result.Add(el);
         RefreshSourceList();
@@ -664,7 +736,9 @@ public sealed class MetadataDialog : Form
     private void RefreshSourceList()
     {
         _srcList.Items.Clear();
-        foreach (var el in Result.Elements(NS + "source")) _srcList.Items.Add(el);
+        foreach (var el in Result.Elements(NS + "query")
+                     .Concat(Result.Elements(NS + "source")))
+            _srcList.Items.Add(el);
     }
 
     private void LoadSource()
@@ -674,10 +748,11 @@ public sealed class MetadataDialog : Form
         _srcConn.Text = (string?)_curSrc?.Attribute("connection") ?? "";
         _srcDataset.Text = (string?)_curSrc?.Attribute("dataset") ?? "";
         _srcBaq.Text = (string?)_curSrc?.Attribute("baq") ?? "";
+        _srcQuery.Text = (string?)_curSrc?.Attribute("query") ?? "";
         _srcArgGrid.Rows.Clear();
         bool en = _curSrc is not null;
         _srcName.Enabled = _srcConn.Enabled = _srcDataset.Enabled =
-            _srcBaq.Enabled = _srcArgGrid.Enabled = en;
+            _srcBaq.Enabled = _srcQuery.Enabled = _srcArgGrid.Enabled = en;
         if (_curSrc is null) return;
         foreach (var a in _curSrc.Attributes())
         {
@@ -696,6 +771,8 @@ public sealed class MetadataDialog : Form
             _srcDataset.Text.Trim() is { Length: > 0 } ds ? ds : null);
         _curSrc.SetAttributeValue("baq",
             _srcBaq.Text.Trim() is { Length: > 0 } bq ? bq : null);
+        _curSrc.SetAttributeValue("query",
+            _srcQuery.Text.Trim() is { Length: > 0 } qy ? qy : null);
         // rebuild the prefixed attribute pairs from the grid
         foreach (var a in _curSrc.Attributes().Where(a =>
                      a.Name.LocalName.StartsWith("param-") ||
@@ -812,7 +889,7 @@ public sealed class MetadataDialog : Form
         {
             string src = (string?)f.Attribute("source") ?? "";
             bool input = src == "prompt" ||
-                         (src == "epicor" && (string?)f.Attribute("override") == "true");
+                         (src is ("epicor" or "rest") && (string?)f.Attribute("override") == "true");
             if (!input) continue;
             entries.Add(($"field: {(string?)f.Attribute("name")}",
                 (string?)f.Attribute("panel") != "hide"));
@@ -1092,13 +1169,13 @@ public sealed class FieldMetaProps
     [Category("Field"), Description("Value used when the source resolves empty")]
     public string IfEmpty { get => Get("if-empty"); set => Set("if-empty", value); }
 
-    [Category("Field"), Description("BAQ column (source=epicor) or list row column (source=list)")]
+    [Category("Field"), Description("Query column (source=epicor: BAQ display column; source=rest with From: GLPI item column, e.g. serial, otherserial, locations_id) or list row column (source=list)")]
     public string Column { get => Get("column"); set => Set("column", value); }
 
-    [Category("Epicor"), Description("Declared etiq:source this field reads (source=epicor); empty = the engine's single implicit BAQ")]
+    [Category("Query"), Description("Declared etiq:query this field reads (source=epicor or rest); empty = the engine's single implicit BAQ (epicor) / per-field connection+pick (rest)")]
     public string From { get => Get("from"); set => Set("from", value); }
 
-    [Category("Epicor"), Description("Operator may type over the fetched value; empty entry = use the pull (source=epicor)")]
+    [Category("Query"), Description("Operator may type over the fetched value; empty entry = use the pull (source=epicor or rest)")]
     public bool Override
     {
         get => Get("override") == "true";

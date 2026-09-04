@@ -195,6 +195,53 @@ public sealed class EditorDoc
             undoIt: () => { el.Remove(); if (forward) swap.AddBeforeSelf(el); else swap.AddAfterSelf(el); }));
     }
 
+    /// <summary>Physical label size as authored: the root width/height
+    /// attributes ("2.4in", "60mm"); null when absent or unit-less.</summary>
+    public (double W, double H, string Unit)? PhysicalSize
+    {
+        get
+        {
+            string? w = (string?)Root.Attribute("width"), h = (string?)Root.Attribute("height");
+            if (w is null || h is null) return null;
+            static (double, string)? Parse(string v)
+            {
+                v = v.Trim();
+                string unit = v.EndsWith("mm") ? "mm" : v.EndsWith("in") ? "in" : "";
+                if (unit == "") return null;
+                return double.TryParse(v[..^2], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var d) ? (d, unit) : null;
+            }
+            if (Parse(w) is not { } pw || Parse(h) is not { } ph) return null;
+            return (pw.Item1, ph.Item1, pw.Item2 == ph.Item2 ? pw.Item2 : "in");
+        }
+    }
+
+    /// <summary>Resize the label (undoable): root width/height attributes and
+    /// the viewBox extent. Content stays where it is in user units; the
+    /// origin is kept — objects beyond the new edge simply hang off the
+    /// label until moved.</summary>
+    public void SetLabelSize(string widthAttr, string heightAttr, int wMils, int hMils)
+    {
+        var vb = ViewBox;
+        string? oldW = (string?)Root.Attribute("width"), oldH = (string?)Root.Attribute("height");
+        string? oldVb = (string?)Root.Attribute("viewBox");
+        string inv(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        string newVb = $"{inv(vb.X)} {inv(vb.Y)} {wMils} {hMils}";
+        Undo.Push(new EditCommand($"label size {widthAttr} x {heightAttr}",
+            doIt: () =>
+            {
+                Root.SetAttributeValue("width", widthAttr);
+                Root.SetAttributeValue("height", heightAttr);
+                Root.SetAttributeValue("viewBox", newVb);
+            },
+            undoIt: () =>
+            {
+                Root.SetAttributeValue("width", oldW);
+                Root.SetAttributeValue("height", oldH);
+                Root.SetAttributeValue("viewBox", oldVb);
+            }));
+    }
+
     /// <summary>Validate the current XML against the convention.</summary>
     public List<Finding> Validate() =>
         TemplateValidator.Validate(EtiqTemplate.Parse(Xml.ToString()));

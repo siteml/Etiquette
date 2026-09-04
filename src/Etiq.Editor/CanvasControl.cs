@@ -742,6 +742,14 @@ public sealed class CanvasControl : Control
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
         base.OnMouseDoubleClick(e);
+        if (e.Button == MouseButtons.Middle)
+        {
+            // double middle-click = fit (middle-drag pans, so this is the
+            // natural "take me back" gesture); works in every mode
+            _panning = false;
+            FitToWindow();
+            return;
+        }
         if (_doc is null || Mode != EditorMode.Design) return;
         var hit = _doc.HitTest(ToWorld(e.Location), 3 / Zoom);
         if (hit is null) return;
