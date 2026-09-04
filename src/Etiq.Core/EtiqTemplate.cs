@@ -219,6 +219,9 @@ public sealed class EtiqTemplate
         /// <summary>panel="hide": resolve as usual but show no input on the
         /// data panel (prompt/override/list fields).</summary>
         public bool PanelHide => (string?)El.Attribute("panel") == "hide";
+        /// <summary>source=prompt: default= prefills the data-panel box
+        /// (and Clear restores it rather than blanking).</summary>
+        public string? Default => (string?)El.Attribute("default");
         public string? Query => (string?)El.Attribute("query");
         public string? Pick => (string?)El.Attribute("pick");
         public string? FilePath => (string?)El.Attribute("path");

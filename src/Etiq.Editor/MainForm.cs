@@ -713,6 +713,18 @@ public sealed class MainForm : Form
             """;
         _doc = EditorDoc.Parse(xml);
         _doc.MarkDirty();   // choosing the canvas size already is work
+        // generator stamp: warn (open anyway) when the template was saved
+        // by a newer Etiquette — it may use features this build lacks
+        if (Version.TryParse((string?)_doc.EtiqLabel()?.Attribute("generator") ?? "", out var gen))
+        {
+            var g3 = new Version(gen.Major, gen.Minor, Math.Max(gen.Build, 0));
+            if (g3 > UpdateChecker.Current)
+                MessageBox.Show(this,
+                    $"This template was saved with Etiquette {g3} — you are running " +
+                    $"{UpdateChecker.Current.ToString(3)}. It may use features this version " +
+                    "doesn't understand; consider updating before editing it.",
+                    "Newer template", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
         _canvas.Doc = _doc;
         _doc.Undo.Changed += OutlineMaybeRefresh; // deletes/undo/redo update the tree
         RefreshDeclaredFieldNames();
@@ -912,6 +924,18 @@ public sealed class MainForm : Form
         {
             MessageBox.Show(this, ex.Message, "Open failed"); return;
         }
+        // generator stamp: warn (open anyway) when the template was saved
+        // by a newer Etiquette — it may use features this build lacks
+        if (Version.TryParse((string?)_doc.EtiqLabel()?.Attribute("generator") ?? "", out var gen))
+        {
+            var g3 = new Version(gen.Major, gen.Minor, Math.Max(gen.Build, 0));
+            if (g3 > UpdateChecker.Current)
+                MessageBox.Show(this,
+                    $"This template was saved with Etiquette {g3} — you are running " +
+                    $"{UpdateChecker.Current.ToString(3)}. It may use features this version " +
+                    "doesn't understand; consider updating before editing it.",
+                    "Newer template", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
         _canvas.Doc = _doc;
         _doc.Undo.Changed += OutlineMaybeRefresh; // deletes/undo/redo update the tree
         RefreshDeclaredFieldNames();
@@ -929,6 +953,9 @@ public sealed class MainForm : Form
         if (path is null && _doc.Path is null) { SaveAsDialog(); return; }   // new unsaved doc
         try
         {
+            // stamp the saving app's version on etiq:label — open warns when
+            // a template was made by a NEWER Etiquette than the one running
+            _doc.EtiqLabel()?.SetAttributeValue("generator", UpdateChecker.Current.ToString(3));
             _doc.Save(path);
             UpdateStatusInfo();
             UpdateTitle();
@@ -1634,6 +1661,8 @@ public sealed class MainForm : Form
                                                    // normalizes title at resolve time
                 },
             };
+            if (f.Source == "prompt" && f.Default is { Length: > 0 } dflt)
+                tb.Text = dflt;   // prefill; Clear restores it too
             tb.TextChanged += (_, _) => Touched();
             // remote sources gate on focus (see FetchSourceColumn): leaving
             // the box is the "entry done" signal, so refresh again then
@@ -1807,8 +1836,11 @@ public sealed class MainForm : Form
                         Btn("Clear", 90, () =>
                         {
                             _previewTimer?.Stop();   // one refresh at the end, not per box
-                            foreach (var tb in _promptBoxes.Values) tb.Text = "";
-                            foreach (var cb in _listCombos.Values) { cb.SelectedIndex = -1; cb.Text = ""; }
+                            foreach (var (name, tb) in _promptBoxes)
+                                tb.Text = template.Fields.FirstOrDefault(f =>
+                                    f.Name == name && f.Source == "prompt")?.Default ?? "";
+                            // pick lists RESET (default / first row), never blank
+                            foreach (var cb in _listCombos.Values) cb.Text = cb.Tag as string ?? "";
                             RefreshPreview(template);
                         });
                         break;
@@ -2087,6 +2119,12 @@ public sealed class MainForm : Form
             if (_listRowSets.ContainsKey(_listRowSig.GetValueOrDefault(l.Name) ?? ""))
                 _listNotes[l.Name] = (note, warn);
         }
+        // remember the "reset" position for the Clear button (default= if it
+        // matches a row, else the first row) — Clear must never blank a
+        // picker that has a defined set of entries
+        cb.Tag = l.Default is { } dflt && map.ContainsValue(dflt)
+            ? map.First(kv => kv.Value == dflt).Key
+            : cb.Items.Count > 0 ? cb.Items[0]!.ToString() : "";
         if (prevText != "" && map.ContainsKey(prevText)) cb.Text = prevText;
         else if (l.Default is { } d && map.ContainsValue(d))
             cb.Text = map.First(kv => kv.Value == d).Key;
@@ -2198,19 +2236,29 @@ public sealed class MainForm : Form
                 string? ds = src.Dataset ?? ActiveDataset;
                 try
                 {
+                    // Task.Run: this sync-over-async wait can land ON the UI
+                    // thread (e.g. a prompt default= makes the query eligible
+                    // during panel build) — without the hop, client awaits
+                    // resuming on the blocked UI thread = deadlock
                     if (isEpicor)
                     {
-                        using var client = new EpicorClient(conn.ToEpicorConfig(ds));
-                        row = client.FetchSourceRowAsync(target, pars, fils)
-                            .GetAwaiter().GetResult();
+                        row = Task.Run(async () =>
+                        {
+                            using var client = new EpicorClient(conn.ToEpicorConfig(ds));
+                            return await client.FetchSourceRowAsync(target, pars, fils)
+                                .ConfigureAwait(false);
+                        }).GetAwaiter().GetResult();
                     }
                     else
                     {
                         // glpi: query= is the item type (Computer, Monitor, …);
                         // param-id or filter-<column> picks the item
-                        using var client = new GlpiClient(conn.ToGlpiConfig(ds));
-                        row = client.FetchItemRowAsync(target, pars, fils)
-                            .GetAwaiter().GetResult();
+                        row = Task.Run(async () =>
+                        {
+                            using var client = new GlpiClient(conn.ToGlpiConfig(ds));
+                            return await client.FetchItemRowAsync(target, pars, fils)
+                                .ConfigureAwait(false);
+                        }).GetAwaiter().GetResult();
                     }
                 }
                 catch (Exception ex)

@@ -28,8 +28,7 @@ public sealed class MetadataDialog : Form
 
     // fields tab
     private readonly ListBox _fieldList = new() { Dock = DockStyle.Fill };
-    private readonly PropertyGrid _fieldProps = new()
-        { Dock = DockStyle.Fill, ToolbarVisible = false, HelpVisible = true };
+    private readonly FieldPane _fieldPane = new() { Dock = DockStyle.Fill };
     private readonly Button _editCompose = new()
         { Text = "Edit Compose…", Width = 120, Enabled = false, Anchor = AnchorStyles.Left };
     private readonly Label _composeSummary = new()
@@ -78,6 +77,7 @@ public sealed class MetadataDialog : Form
     private readonly CheckBox _pnBtnPrint = new() { Text = "Print", AutoSize = true, Checked = true };
     private readonly CheckBox _pnBtnPrintAll = new() { Text = "Print All", AutoSize = true, Checked = true };
     private readonly CheckBox _pnBtnClear = new() { Text = "Clear", AutoSize = true, Checked = true };
+    private readonly CheckBox _pnBtnLog = new() { Text = "Log", AutoSize = true };
     private readonly ComboBox _pnButtonsAt = new() { Width = 200, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly CheckedListBox _pnInputs = new() { Width = 300, Height = 170, CheckOnClick = true };
     private List<string> _pnNaturalOrder = new();   // tokens in declaration order
@@ -228,7 +228,7 @@ public sealed class MetadataDialog : Form
         var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
         right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         right.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        right.Controls.Add(_fieldProps, 0, 0);
+        right.Controls.Add(_fieldPane, 0, 0);
         right.Controls.Add(composeBar, 0, 1);
 
         page.Controls.Add(SplitPage(_fieldList, right,
@@ -237,10 +237,14 @@ public sealed class MetadataDialog : Form
         _fieldList.SelectedIndexChanged += (_, _) =>
         {
             _curField = _fieldList.SelectedItem as XElement;
-            _fieldProps.SelectedObject = _curField is not null
-                ? new FieldMetaProps(_curField, () =>
-                    { RefreshFieldList(keepSelection: true); UpdateComposeUi(); })
-                : null;
+            _fieldPane.SetField(_curField, FieldChoices, () =>
+            {
+                // reformat in place — a full list rebuild would reselect and
+                // tear the pane down under the operator's caret
+                int i = _fieldList.SelectedIndex;
+                if (i >= 0) _fieldList.Items[i] = _fieldList.Items[i];
+                UpdateComposeUi();
+            });
             UpdateComposeUi();
         };
         _fieldList.Format += (_, e) =>
@@ -250,6 +254,36 @@ public sealed class MetadataDialog : Form
         };
         _fieldList.FormattingEnabled = true;
         return page;
+    }
+
+    /// <summary>Live combo content for the field pane, read from the
+    /// working clone (and the machine's connections file) at drop-down
+    /// build time — so newly added queries/lists show up immediately.</summary>
+    private string[] FieldChoices(string key) => key switch
+    {
+        "queries" => Result.Elements(NS + "query")
+            .Select(q => (string?)q.Attribute("name") ?? "").Where(n => n != "").ToArray(),
+        "lists" => Result.Elements(NS + "list")
+            .Select(l => (string?)l.Attribute("name") ?? "").Where(n => n != "").ToArray(),
+        "columns" => (string?)_curField?.Attribute("list") is { } lr
+            ? Result.Elements(NS + "list")
+                .FirstOrDefault(l => (string?)l.Attribute("name") == lr)
+                ?.Attribute("columns")?.Value.Split(',',
+                    StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                ?? Array.Empty<string>()
+            : Array.Empty<string>(),
+        "connections" => SafeConnectionNames(),
+        _ => Array.Empty<string>(),
+    };
+
+    private static string[] SafeConnectionNames()
+    {
+        try
+        {
+            return ConnectionsStore.Load(MainForm.ConnectionsPath)
+                .Select(c => c.Name).Where(n => !string.IsNullOrEmpty(n)).ToArray()!;
+        }
+        catch { return Array.Empty<string>(); }
     }
 
     /// <summary>Enable the Edit Compose button for compose fields and show
@@ -659,7 +693,7 @@ public sealed class MetadataDialog : Form
         if (list.SelectedItem is not XElement el) return;
         if (ReferenceEquals(el, _curMap)) _curMap = null;
         if (ReferenceEquals(el, _curList)) _curList = null;
-        if (ReferenceEquals(el, _curField)) { _curField = null; _fieldProps.SelectedObject = null; UpdateComposeUi(); }
+        if (ReferenceEquals(el, _curField)) { _curField = null; _fieldPane.SetField(null, FieldChoices, () => { }); UpdateComposeUi(); }
         el.Remove();
         refresh();
     }
@@ -694,7 +728,7 @@ public sealed class MetadataDialog : Form
             Text = "Params/filters — Value is a literal, or {FieldName} to feed a field's " +
                    "resolved value in. Fields consume this query via From + Column. " +
                    "Epicor: param-<BAQ parameter>, filter-<display column>. GLPI: param-id, or filter-<column> (serial, otherserial, name…).",
-            Left = 6, Top = 158, AutoSize = false, Height = 66,
+            Left = 6, Top = 158, AutoSize = false,
             ForeColor = SystemColors.GrayText,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
@@ -703,8 +737,13 @@ public sealed class MetadataDialog : Form
         right.Controls.Add(_srcArgGrid);
         right.Resize += (_, _) =>
         {
+            // the hint's height depends on wrap (width, DPI, font) — measure
+            // it and put the grid BELOW it, never at a guessed fixed offset
             hint.Width = right.Width - 12;
-            _srcArgGrid.SetBounds(6, 230, right.Width - 12, right.Height - 236);
+            hint.Height = TextRenderer.MeasureText(hint.Text, hint.Font,
+                new Size(hint.Width, int.MaxValue), TextFormatFlags.WordBreak).Height + 4;
+            int top = hint.Bottom + 6;
+            _srcArgGrid.SetBounds(6, top, right.Width - 12, right.Height - top - 6);
         };
 
         page.Controls.Add(SplitPage(_srcList, right,
@@ -823,7 +862,7 @@ public sealed class MetadataDialog : Form
               "ask (no selector; popup only when it matters)" });
         Row("Collation", _pnCollate);
         var btns = new FlowLayoutPanel { Left = 150, Top = y, Width = 480, Height = 28 };
-        btns.Controls.AddRange(new Control[] { _pnBtnPreview, _pnBtnPrint, _pnBtnPrintAll, _pnBtnClear });
+        btns.Controls.AddRange(new Control[] { _pnBtnPreview, _pnBtnPrint, _pnBtnPrintAll, _pnBtnClear, _pnBtnLog });
         p.Controls.Add(new Label { Text = "Buttons", Left = 10, Top = y + 3, AutoSize = true });
         p.Controls.Add(btns);
         y += 34;
@@ -881,6 +920,7 @@ public sealed class MetadataDialog : Form
         _pnBtnPrint.Checked = btns.Contains("print");
         _pnBtnPrintAll.Checked = btns.Contains("printall");
         _pnBtnClear.Checked = btns.Contains("clear");
+        _pnBtnLog.Checked = btns.Contains("log");
         _pnButtonsAt.SelectedIndex = A("buttons-at") == "top" ? 1 : 0;
 
         _pnInputs.Items.Clear();
@@ -932,7 +972,10 @@ public sealed class MetadataDialog : Form
         if (_pnBtnPrint.Checked) picked.Add("print");
         if (_pnBtnPrintAll.Checked) picked.Add("printall");
         if (_pnBtnClear.Checked) picked.Add("clear");
-        string? buttons = picked.Count == 4 ? null : string.Join(",", picked);
+        if (_pnBtnLog.Checked) picked.Add("log");
+        // default set = preview,print,printall,clear (log is opt-in)
+        string? buttons = picked.Count == 4 && !_pnBtnLog.Checked
+            ? null : string.Join(",", picked);
         string? at = _pnButtonsAt.SelectedIndex == 1 ? "top" : null;
         var tokens = _pnInputs.Items.Cast<string>()
             .Select(t => t.Replace(": ", ":")).ToList();
@@ -1011,7 +1054,7 @@ public sealed class MetadataDialog : Form
         _curMap = null;
         _curList = null;
         _curSrc = null;
-        _fieldProps.SelectedObject = null;
+        _fieldPane.SetField(null, FieldChoices, () => { });
         var fresh = new XElement(_appliedSnapshot);
         Result.ReplaceAll(fresh.Attributes().Cast<object>().Concat(fresh.Nodes()).ToArray());
         RefreshFieldList();
@@ -1120,89 +1163,6 @@ public sealed class MetadataDialog : Form
 
 /// <summary>PropertyGrid adapter for one etiq:field element (edits the
 /// dialog's working clone directly, so unknown attributes survive).</summary>
-public sealed class FieldMetaProps
-{
-    private readonly XElement _el;
-    private readonly Action _changed;
-    public FieldMetaProps(XElement el, Action changed) { _el = el; _changed = changed; }
-
-    private string Get(string a) => (string?)_el.Attribute(a) ?? "";
-    private void Set(string a, string? v)
-    {
-        _el.SetAttributeValue(a, string.IsNullOrEmpty(v) ? null : v);
-        _changed();
-    }
-
-    [Category("Field"), Description("Unique field name; bind elements to it via data-field")]
-    public string Name { get => Get("name"); set => Set("name", value); }
-
-    [Category("Field"), TypeConverter(typeof(SourceKindConverter)),
-     Description("epicor | rest | prompt | serial | auto | fixed | compose | list (db/file/device reserved)")]
-    public string Source { get => Get("source"); set => Set("source", value); }
-
-    [Category("Field"), Description("Prompt caption shown to the operator (source=prompt)")]
-    public string Caption { get => Get("caption"); set => Set("caption", value); }
-
-    [Category("Field"), Description("Fixed/auto value (source=fixed, or auto e.g. date:dd-MMM-yyyy)")]
-    public string Value { get => Get("value"); set => Set("value", value); }
-
-    [Category("Field"), Description("Result casing: (empty=normal) | upper | lower | title")]
-    public string Case { get => Get("case"); set => Set("case", value); }
-
-    [Category("Field"), Description("compose only: drop lines that end up empty (address-block blank suppression)")]
-    public bool CollapseBlankLines
-    {
-        get => Get("collapse-blank-lines") == "true";
-        set => Set("collapse-blank-lines", value ? "true" : null);
-    }
-
-    [Category("Field")]
-    public bool Required
-    {
-        get => Get("required") == "true";
-        set => Set("required", value ? "true" : null);
-    }
-
-    [Category("Field"), Description("block (default) | cached | use:VALUE")]
-    public string OnFail { get => Get("on-fail"); set => Set("on-fail", value); }
-
-    [Category("Field"), Description("Value used when the source resolves empty")]
-    public string IfEmpty { get => Get("if-empty"); set => Set("if-empty", value); }
-
-    [Category("Field"), Description("Query column (source=epicor: BAQ display column; source=rest with From: GLPI item column, e.g. serial, otherserial, locations_id) or list row column (source=list)")]
-    public string Column { get => Get("column"); set => Set("column", value); }
-
-    [Category("Query"), Description("Declared etiq:query this field reads (source=epicor or rest); empty = the engine's single implicit BAQ (epicor) / per-field connection+pick (rest)")]
-    public string From { get => Get("from"); set => Set("from", value); }
-
-    [Category("Query"), Description("Operator may type over the fetched value; empty entry = use the pull (source=epicor or rest)")]
-    public bool Override
-    {
-        get => Get("override") == "true";
-        set => Set("override", value ? "true" : null);
-    }
-
-    [Category("Serial"), Description("Counter name (source=serial)")]
-    public string Counter { get => Get("counter"); set => Set("counter", value); }
-
-    [Category("Serial"), Description("Serial format, e.g. 0000 or base36:4")]
-    public string Format { get => Get("format"); set => Set("format", value); }
-
-    [Category("List"), Description("Embedded list this field reads (source=list); value comes from Column")]
-    public string List { get => Get("list"); set => Set("list", value); }
-
-    [Category("Rest"), Description("Connection profile name (source=rest)")]
-    public string Connection { get => Get("connection"); set => Set("connection", value); }
-
-    [Category("Rest"), Description("Query / endpoint path")]
-    public string Query { get => Get("query"); set => Set("query", value); }
-
-    [Category("Rest"), Description("Dotted JSON path into the response, e.g. assets.0.name")]
-    public string Pick { get => Get("pick"); set => Set("pick", value); }
-
-    public override string ToString() => Get("name");
-}
-
 public sealed class AlignConverter : StringConverter
 {
     public override bool GetStandardValuesSupported(ITypeDescriptorContext? c) => true;
@@ -1225,15 +1185,6 @@ public sealed class VAlignConverter : StringConverter
     public override bool GetStandardValuesExclusive(ITypeDescriptorContext? c) => false;
     public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? c) =>
         new(new[] { "top", "middle", "bottom" });
-}
-
-/// <summary>Dropdown of valid source kinds in the PropertyGrid.</summary>
-public sealed class SourceKindConverter : StringConverter
-{
-    public override bool GetStandardValuesSupported(ITypeDescriptorContext? c) => true;
-    public override bool GetStandardValuesExclusive(ITypeDescriptorContext? c) => false;
-    public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? c) =>
-        new(new[] { "epicor", "rest", "prompt", "serial", "auto", "fixed", "compose", "list" });
 }
 
 /// <summary>Dropdown of the template's declared field names for the

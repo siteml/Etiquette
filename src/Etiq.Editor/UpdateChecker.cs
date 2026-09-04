@@ -28,8 +28,19 @@ public static class UpdateChecker
                                  string? StandaloneUrl, string? StandaloneName,
                                  string? FrameworkUrl, string? FrameworkName);
 
-    public static Version Current =>
-        typeof(UpdateChecker).Assembly.GetName().Version ?? new Version(0, 0, 0);
+    /// <summary>Running version, normalized to THREE components. The
+    /// assembly reports 0.8.0.0 while a release tag parses to 0.8.0, and
+    /// System.Version treats the missing revision as -1 — so un-normalized,
+    /// "same version" compares FALSE and the same-version flavor-switch
+    /// offer never fires.</summary>
+    public static Version Current
+    {
+        get
+        {
+            var v = typeof(UpdateChecker).Assembly.GetName().Version ?? new Version(0, 0, 0);
+            return new Version(v.Major, v.Minor, Math.Max(v.Build, 0));
+        }
+    }
 
     /// <summary>Which publish flavor is THIS running build? A self-contained
     /// single-file publish bundles the runtime, so core assemblies have no
@@ -196,7 +207,10 @@ public static class UpdateChecker
 
         string ver = tag.TrimStart('v', 'V');
         return Version.TryParse(ver.Contains('.') ? ver : ver + ".0", out var v)
-            ? new Release(v, tag, url, saUrl, saName, fdUrl, fdName)
+            // normalize to three components like Current — Version's missing
+            // parts are -1 and poison equality/ordering otherwise
+            ? new Release(new Version(v.Major, Math.Max(v.Minor, 0), Math.Max(v.Build, 0)),
+                          tag, url, saUrl, saName, fdUrl, fdName)
             : null;
     }
 }

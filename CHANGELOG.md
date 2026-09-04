@@ -4,6 +4,42 @@ All notable changes to Etiquette are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver
 (pre-1.0: minor bumps may change behavior).
 
+## [0.9.0] — 2026-09-04
+
+### Added
+- **Prompt defaults** — `default=` on a `source="prompt"` field prefills
+  the data-panel input, and **Clear** restores it instead of blanking.
+- **Field editor pane** — the F4 Fields tab replaces the property grid
+  with a purpose-built pane: only the attributes that apply to the
+  selected source, in a sensible order, with hints under each input and
+  live dropdowns (declared queries, lists, the chosen list's columns,
+  the machine's connections, case / on-fail value sets). Driven by a
+  single spec table, so schema changes stay one-line edits.
+- **Panel tab: Log button** — the print-log panel button is now a
+  checkbox next to Preview/Print/Print All/Clear (opt-in; the default
+  button set is unchanged).
+- **Template version stamp** — saving writes
+  `generator="<version>"` on `etiq:label`; opening a template saved by a
+  NEWER Etiquette warns that it may use features this build lacks
+  (older templates open silently, as before).
+
+### Changed
+- **Clear vs pick lists** — Clear now RESETS list-sourced dropdowns to
+  their `default=` row (or the first row) rather than emptying a picker
+  that has a defined set of entries; prompt boxes still clear (to their
+  `default=`, if any).
+
+### Fixed
+- **Update flavor switch** — version comparison normalized to three
+  components (assembly `0.8.0.0` vs tag `0.8.0`), so Check for Updates
+  correctly offers the framework-dependent/self-contained switch again.
+- **F4 Queries tab** — the params/filters grid no longer clips under the
+  hint text at any window width or display scale (the hint is measured,
+  the grid placed below it).
+- **Compose dialog** — details-pane rows align vertically; map default
+  "blank" checkbox semantics (`default=""`) with `\` escape for a
+  literal leading backslash.
+
 ## [0.8.0] — 2026-09-04
 
 ### Added

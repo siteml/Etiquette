@@ -2206,6 +2206,20 @@ Check("CredentialStore secret detection + passthrough", () =>
 
 // ---------- counters ----------
 
+Check("prompt default= parses (data-panel prefill)", () =>
+{
+    var t = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 100 100">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:field name="Qty" source="prompt" caption="QTY:" default="170"/>
+            <etiq:field name="Lot" source="prompt"/>
+          </etiq:label></metadata>
+        </svg>
+        """);
+    AssertEq("170", t.Fields.First(f => f.Name == "Qty").Default ?? "", "default read");
+    AssertEq("", t.Fields.First(f => f.Name == "Lot").Default ?? "", "absent = null");
+});
+
 Check("SerialFormat padding + base36", () =>
 {
     AssertEq("000042", SerialFormat.Format(42, "000000"), "zero pad");
