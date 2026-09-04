@@ -215,7 +215,9 @@ public static class TemplateValidator
                         Err("field-list", $"field '{f.Name}': list '{f.ListRef}' is not declared");
                     else if (string.IsNullOrWhiteSpace(f.Column))
                         Err("field-list", $"field '{f.Name}': source=list requires column=");
-                    else if (!ld.Rows.Any(r => r.ContainsKey(f.Column)))
+                    else if (ld.From is null && !ld.Rows.Any(r => r.ContainsKey(f.Column)))
+                        // query-fed lists get their columns at run time —
+                        // nothing to cross-check statically
                         Err("field-list", $"field '{f.Name}': no row of list '{f.ListRef}' has a column '{f.Column}'");
                     else if (!ld.Rows.All(r => r.ContainsKey(f.Column)))
                         Warn("field-list", $"field '{f.Name}': column '{f.Column}' is missing from some rows of '{f.ListRef}' (resolves empty there)");

@@ -1768,7 +1768,9 @@ Check("GlpiClient: filter search narrows substring hits to exact, 206 accepted, 
         if (req.RequestUri.AbsolutePath.EndsWith("/killSession")) return Json("true");
         AssertEq("/apirest.php/Monitor", req.RequestUri.AbsolutePath, "list path");
         string q = Uri.UnescapeDataString(req.RequestUri.Query);
-        Assert(q.Contains("searchText[serial]=SN1"), "searchText filter: " + q);
+        // the same handler serves the SN1 fetch AND the ZZZ no-match probe —
+        // assert the filter's SHAPE, not one value
+        Assert(q.Contains("searchText[serial]="), "searchText filter: " + q);
         Assert(q.Contains("range=0-49"), "ranged");
         return new HttpResponseMessage(HttpStatusCode.PartialContent)
         {
@@ -1886,6 +1888,7 @@ Check("query-fed pick list: validator, ctx.ListRows resolution, GLPI virtual col
     var findings = TemplateValidator.Validate(t);
     Assert(findings.Any(f => f.Code == "list-from" && f.Message.Contains("'Bad'")), "unknown from= flagged");
     Assert(!findings.Any(f => f.Code == "list-rows"), "query-fed list needs no embedded rows");
+    Assert(!findings.Any(f => f.Code == "field-list"), "columns of a query-fed list are run-time — no static cross-check");
     Assert(!findings.Any(f => f.Code == "source-open"), "a list-consumed query is expected to be open");
 
     var rows = new List<Dictionary<string, string>>
