@@ -1,9 +1,42 @@
 # Roadmap
 
-Where Etiquette is and where it's going. Current release: **v0.7.0**
+Where Etiquette is and where it's going. Current release: **v0.10.0**
 (see the Releases page; `etiqedit` checks it via Help → Check for Updates).
 
 Legend: `[x]` done · `[~]` partially done · `[ ]` not started.
+
+## Shipped — v0.10.0
+
+- [x] **Display units & lossless coordinates** — in / mm / mils / dots
+      over an unchanging mils model (`Num.F`, nine decimals), fonts in
+      points, typed unit suffixes everywhere.
+- [x] **Grid, dot snapping, view state** — `etiq:view` (docs/convention.md),
+      manual or printer-dot grid from a stored `dots-per-mm` (never a
+      printer name), adaptive drawing with heavy counting lines, snap
+      toggles, Snap All to Grid, print-time density mismatch warning.
+- [x] **Rulers & guides** — drag out of a ruler, magnetic, lockable,
+      undoable, per template; Inkscape guides imported read-only.
+- [x] **Redact Sensitive** — field-level `sensitive`/`stand-in` resolved at
+      display time (composes redact only the sensitive part), element-level
+      `data-sensitive` for static text, masked pick lists; print untouched.
+- [x] **Proof prints on sheet printers** — label top-left with a cut
+      outline, orientation setting; Help → Last Print Details….
+- [x] Fields tab no longer rebuilds per keystroke; live relabel on every
+      metadata tab.
+
+## Shipped — v0.9.0
+
+- [x] Prompt `default=`, purpose-built Fields editor pane (spec-table
+      driven), panel Log button, `generator=` version stamp with a
+      newer-template warning, Clear resets pick lists.
+
+## Shipped — v0.8.0
+
+- [x] **GLPI connections** + live asset picker (query-fed pick lists,
+      virtual columns), segment `split`/`part`, compose dialog redesign,
+      **print log** (JSON-lines, spool watcher, viewer + reprint),
+      per-printer print offset, File → Label Size…, Connections export
+      picker, Fit to Window.
 
 ## Shipped — v0.7.0
 
@@ -113,6 +146,9 @@ The suite is usable end to end for the design → data → print loop:
       layout interaction, no-print layers hidden, prompt entry with
       searchable pickers, auto preview, gated Print, and Print All with
       collation control.
+- [x] **Units, grid, rulers, guides** — display units over a lossless mils
+      model, printer-dot grid, magnetic guides (`docs/grid-guides.md`).
+- [x] **Redact Sensitive** — screen-only stand-ins for remote demos.
 - [x] Toolkit decision (2026-08-02): WinForms over Avalonia/MAUI, because
       the canvas GDI+ stack *is* the driver print path's text stack, so
       preview metrics match printed output; the fleet is Windows-only.
@@ -124,6 +160,7 @@ The suite is usable end to end for the design → data → print loop:
 - [ ] Dirty-document close guard (Exit and update-restart never prompt to
       save today)
 - [ ] Rotate handle drag, line endpoint handles, rotated-resize snapping
+      (rotated objects are also skipped by Snap All to Grid until then)
 - [ ] Marquee touch-select and multi-object resize
 - [ ] Layer dimming; add-object palette
 - [ ] HRI rendering on canvas; `data-overflow="wrap"`

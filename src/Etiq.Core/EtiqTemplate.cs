@@ -78,6 +78,9 @@ public sealed class EtiqTemplate
         public string Name => (string?)El.Attribute("name") ?? "";
         public string? Default => (string?)El.Attribute("default");
         public IEnumerable<XElement> Whens => El.Elements(Ns + "when");
+        /// <summary>ignore-case="true": rows match case-insensitively;
+        /// a row's own ignore-case= overrides the map's.</summary>
+        public bool IgnoreCase => (string?)El.Attribute("ignore-case") == "true";
     }
 
     /// <summary>An embedded pick list (convention 0.2 "Embedded pick
@@ -216,6 +219,13 @@ public sealed class EtiqTemplate
         /// value — a non-empty prompt entry wins, an empty one falls back
         /// to the remote pull (shown as ghost text in the data panel).</summary>
         public bool Override => (string?)El.Attribute("override") == "true";
+        /// <summary>Editor-only screen redaction (docs/convention.md
+        /// `sensitive`): while the designer's Redact Sensitive mode is on,
+        /// this field resolves to its stand-in everywhere the editor shows
+        /// it — including inside compose fields that reference it. Engines
+        /// and print paths ignore both attributes.</summary>
+        public bool Sensitive => (string?)El.Attribute("sensitive") == "true";
+        public string? StandIn => (string?)El.Attribute("stand-in");
         /// <summary>panel="hide": resolve as usual but show no input on the
         /// data panel (prompt/override/list fields).</summary>
         public bool PanelHide => (string?)El.Attribute("panel") == "hide";

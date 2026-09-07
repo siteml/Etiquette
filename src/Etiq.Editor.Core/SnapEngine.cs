@@ -16,9 +16,10 @@ public static class SnapEngine
     /// `others` (+ optional label rect). `tol` in world units. Returns
     /// (0,0,[]) when nothing is within tolerance.</summary>
     public static (double Dx, double Dy, List<SnapGuide> Guides) Adjust(
-        RectD moving, IReadOnlyList<RectD> others, RectD? label, double tol)
+        RectD moving, IReadOnlyList<RectD> others, RectD? label, double tol,
+        IReadOnlyList<double>? guideXs = null, IReadOnlyList<double>? guideYs = null)
     {
-        var (xs, ys) = Candidates(others, label);
+        var (xs, ys) = Candidates(others, label, guideXs, guideYs);
 
         double[] movingXs = { moving.X, moving.X + moving.W / 2, moving.Right };
         double[] movingYs = { moving.Y, moving.Y + moving.H / 2, moving.Bottom };
@@ -37,9 +38,10 @@ public static class SnapEngine
     /// point plus the guides to draw.</summary>
     public static (PointD P, List<SnapGuide> Guides) SnapPoint(
         PointD p, IReadOnlyList<RectD> others, RectD? label, double tol,
-        bool snapX = true, bool snapY = true)
+        bool snapX = true, bool snapY = true,
+        IReadOnlyList<double>? guideXs = null, IReadOnlyList<double>? guideYs = null)
     {
-        var (xs, ys) = Candidates(others, label);
+        var (xs, ys) = Candidates(others, label, guideXs, guideYs);
         var guides = new List<SnapGuide>();
         double nx = p.X, ny = p.Y;
         if (snapX)
@@ -55,11 +57,17 @@ public static class SnapEngine
         return (new PointD(nx, ny), guides);
     }
 
+    /// <summary>Edge/centre candidates of the stationary objects and label,
+    /// plus operator guides (docs/grid-guides.md: guides are magnetic like
+    /// objects, never hard like the grid).</summary>
     private static (List<double> Xs, List<double> Ys) Candidates(
-        IReadOnlyList<RectD> others, RectD? label)
+        IReadOnlyList<RectD> others, RectD? label,
+        IReadOnlyList<double>? guideXs = null, IReadOnlyList<double>? guideYs = null)
     {
         var xs = new List<double>();
         var ys = new List<double>();
+        if (guideXs is not null) xs.AddRange(guideXs);
+        if (guideYs is not null) ys.AddRange(guideYs);
         foreach (var r in others)
         {
             xs.Add(r.X); xs.Add(r.X + r.W / 2); xs.Add(r.Right);

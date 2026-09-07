@@ -13,6 +13,27 @@ namespace Etiq.Editor;
 /// </summary>
 public static class PrintService
 {
+    /// <summary>A sheet (office) printer, judged by its DEFAULT form: short
+    /// side ≥ 7 in (A5 and up). Label and tape printers default to their
+    /// stock (4 in wide industrial heads, 18 mm tape…) and accept custom
+    /// forms; office drivers list "User Defined" too but then park a
+    /// label-sized page in a corner of the sheet, so the form list is not
+    /// a usable signal.</summary>
+    private static bool IsSheetPrinter(PrinterSettings ps)
+    {
+        try
+        {
+            // a FRESH settings object: the document's own PrinterSettings has
+            // already had the label form pushed into DefaultPageSettings
+            // above, so reading it back would only echo our 6×4 request
+            var fresh = new PrinterSettings { PrinterName = ps.PrinterName };
+            if (!fresh.IsValid) return false;
+            var dflt = fresh.DefaultPageSettings.PaperSize;
+            return Math.Min(dflt.Width, dflt.Height) >= 700;   // hundredths of an inch
+        }
+        catch { return false; }
+    }
+
     /// <summary>Per-PRINTER print nudge in mils (settings.json key
     /// "printOffset:<printer name>" = "x,y"; Help > Options). Positive =
     /// right / down. Corrects a driver whose reported hard margin does not
@@ -48,10 +69,15 @@ public static class PrintService
     /// (labelprint behavior — etiq:panel print="direct"): the job goes to
     /// `printer` when named, else the machine default. Copies/collation
     /// are expanded into PAGES by the caller, never left to the driver.</summary>
+    /// <summary>What the last job actually asked the driver for — shown on
+    /// the data-panel status line so paging surprises can be diagnosed.</summary>
+    public static string? LastInfo { get; private set; }
+
     public static void PrintBatch(IWin32Window owner, EditorDoc doc,
                                   IReadOnlyList<IReadOnlyDictionary<string, string>?> pages,
                                   ITextMeasurer measurer, bool direct, string? printer)
     {
+        LastInfo = null;
         if (pages.Count == 0) return;
         var vb = doc.ViewBox;
         if (vb.W <= 0 || vb.H <= 0)
@@ -87,22 +113,39 @@ public static class PrintService
         }
         int page = 0;
         int offX = 0, offY = 0;   // set once the printer is known (below)
+        // SHEET mode: an office printer (Letter/A4 forms, nothing near the
+        // label size) cannot make a 6×4 page — asked for one, the driver
+        // prints on its default sheet and parks the "page" wherever it
+        // likes (right-aligned, half in the unprintable margin). Detected
+        // once the printer is known: keep the sheet, pick the orientation
+        // the label fits, place it top-left of the printable area (works on
+        // any paper size) and draw a hairline cut outline.
+        bool sheet = false, sheetLandscape = false;
         // per PAGE, after the driver's own DEVMODE has been applied: some
         // drivers (Brother P-touch once its Preferences were OK'd) reassert
         // their stored form between pages — this is the last word
         pd.QueryPageSettings += (_, e) =>
         {
-            e.PageSettings.PaperSize = paper;
             e.PageSettings.Margins = new Margins(0, 0, 0, 0);
+            if (sheet) { e.PageSettings.Landscape = sheetLandscape; return; }   // the sheet's own form stands
+            e.PageSettings.PaperSize = paper;
             e.PageSettings.Landscape = vb.W > vb.H;
         };
         pd.PrintPage += (_, e) =>
         {
             var g = e.Graphics!;
             g.PageUnit = GraphicsUnit.Display;   // 1/100 inch
-            // origin at the physical page corner, not the printable margin
-            g.TranslateTransform(-e.PageSettings.HardMarginX, -e.PageSettings.HardMarginY);
+            // label printer: origin at the PHYSICAL page corner (the page is
+            // the label; the driver's hard margin is a lie for stock).
+            // sheet printer: origin at the PRINTABLE corner — top-left, so
+            // the label lands whole on any paper size, never in the dead zone.
+            if (!sheet) g.TranslateTransform(-e.PageSettings.HardMarginX, -e.PageSettings.HardMarginY);
             g.ScaleTransform(0.1f, 0.1f);        // world = mils (1/1000 in)
+            if (sheet)
+            {
+                using var cut = new Pen(Color.Gray, 4f) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash };
+                g.DrawRectangle(cut, offX, offY, (float)vb.W, (float)vb.H);
+            }
             g.TranslateTransform((float)(offX - vb.X), (float)(offY - vb.Y));
             LabelRenderer.Draw(g, doc, pages[page], measurer);
             page++;
@@ -130,6 +173,27 @@ public static class PrintService
                 Document = pd, UseEXDialog = true, AllowSomePages = false,
             };
             if (dlg.ShowDialog(owner) != DialogResult.OK) return;
+            // designed-for vs printing-at: the template may carry the head
+            // density its dot grid was built on (etiq:view dots-per-mm); the
+            // driver reports the queue's real resolution. Numbers only —
+            // never a printer-name match (docs/grid-guides.md).
+            double designed = doc.View.DotsPerMm;
+            int dpiX = pd.PrinterSettings.DefaultPageSettings.PrinterResolution.X;
+            if (designed > 0 && dpiX > 0)
+            {
+                double actual = dpiX / 25.4;
+                if (Math.Abs(actual - designed) / designed > 0.02)
+                {
+                    var r = MessageBox.Show(owner,
+                        $"This template was designed for {Num.F(Math.Round(designed, 2))} dots/mm " +
+                        $"(≈{Num.F(Math.Round(designed * 25.4))} dpi)" +
+                        (string.IsNullOrWhiteSpace(doc.View.Target) ? "" : $", {doc.View.Target}") +
+                        $".\n'{pd.PrinterSettings.PrinterName}' prints at {Num.F(Math.Round(actual, 2))} dots/mm ({dpiX} dpi).\n\n" +
+                        "Dot-aligned edges and barcode modules will land between dots. Print anyway?",
+                        "Printer density mismatch", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (r != DialogResult.Yes) return;
+                }
+            }
         }
         try
         {
@@ -137,11 +201,45 @@ public static class PrintService
             // resets the page settings to THAT printer's default form —
             // re-assert the label size. (The template is the page size;
             // a paper choice made in the dialog is deliberately overridden.)
-            pd.DefaultPageSettings.PaperSize = paper;
+            sheet = IsSheetPrinter(pd.PrinterSettings);
             pd.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
-            pd.DefaultPageSettings.Landscape = vb.W > vb.H;
+            if (sheet)
+            {
+                // the driver's default form; orientation = the LABEL's, so a
+                // proof on paper reads exactly like the label printer's
+                // output (a wide label prints landscape, as on stock); fall
+                // back to the other orientation only if it doesn't fit
+                var dflt = new PrinterSettings { PrinterName = pd.PrinterSettings.PrinterName }
+                    .DefaultPageSettings.PaperSize;
+                pd.DefaultPageSettings.PaperSize = dflt;
+                pd.PrinterSettings.DefaultPageSettings.PaperSize = dflt;
+                bool wide = vb.W > vb.H;
+                double pw = Math.Min(dflt.Width, dflt.Height) * 10.0, ph = Math.Max(dflt.Width, dflt.Height) * 10.0;
+                bool fitsLandscape = vb.W <= ph && vb.H <= pw, fitsPortrait = vb.W <= pw && vb.H <= ph;
+                bool landscape = UnitPrefs.SheetOrientation switch
+                {
+                    "portrait" => false,
+                    "landscape" => true,
+                    _ => wide ? fitsLandscape || !fitsPortrait : !fitsPortrait && fitsLandscape,
+                };
+                // push it EVERYWHERE the driver might read it from
+                pd.DefaultPageSettings.Landscape = landscape;
+                pd.PrinterSettings.DefaultPageSettings.Landscape = landscape;
+                sheetLandscape = landscape;
+            }
+            else
+            {
+                pd.DefaultPageSettings.PaperSize = paper;
+                pd.DefaultPageSettings.Landscape = vb.W > vb.H;
+            }
             (offX, offY) = GetOffset(pd.PrinterSettings.PrinterName);
             page = 0;
+            var dps = pd.DefaultPageSettings;
+            LastInfo = $"{(sheet ? "sheet" : "label")} mode → {pd.PrinterSettings.PrinterName}: form " +
+                       (sheet ? $"(sheet orientation setting: {UnitPrefs.SheetOrientation}) " : "") +
+                       $"{dps.PaperSize.PaperName} {dps.PaperSize.Width / 100.0:0.##}×{dps.PaperSize.Height / 100.0:0.##} in, " +
+                       $"{(dps.Landscape ? "landscape" : "portrait")}, hard margin {dps.HardMarginX / 100.0:0.##}/{dps.HardMarginY / 100.0:0.##} in, " +
+                       $"offset {offX}/{offY} mils";
             pd.Print();
             // spooled ≠ printed: log each label's values (the reprintable
             // record), then watch the queue for the job's real fate

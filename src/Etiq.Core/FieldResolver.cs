@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Xml.Linq;
 
 namespace Etiq.Core;
 
@@ -50,6 +51,13 @@ public sealed class ResolveContext
 
     /// <summary>Called when a cached value is substituted, for the job log.</summary>
     public Action<string>? OnCachedValueUsed { get; init; }
+
+    /// <summary>Display substitutions: field name → value used INSTEAD of
+    /// resolving that field (the editor's screen redaction: sensitive
+    /// fields resolve to their stand-in, so a compose of sensitive and
+    /// public parts shows exactly the public parts). Compose refs see the
+    /// substitute. Print paths never set this.</summary>
+    public IReadOnlyDictionary<string, string>? Substitutes { get; init; }
 
     /// <summary>Print-time clock for auto date/time fields.</summary>
     public DateTime Now { get; init; } = DateTime.Now;
@@ -110,6 +118,11 @@ public sealed class FieldResolver
             throw new ResolveException(name, "circular reference (field depends on itself)");
         try
         {
+        if (_ctx.Substitutes is not null && _ctx.Substitutes.TryGetValue(name, out var sub))
+        {
+            _memo[name] = sub;
+            return sub;
+        }
 
         string value = f.Source switch
         {
@@ -325,14 +338,19 @@ public sealed class FieldResolver
         var map = _maps.GetValueOrDefault(s.Map!)
             ?? throw new ResolveException(field, $"seg #{idx} map '{s.Map}' not declared");
 
-        // exact rows win over prefix rows, then document order
+        // exact rows win over prefix rows, then document order.
+        // ignore-case= on a row (falling back to the map's) makes that
+        // row match case-insensitively; matching stays Ordinal otherwise.
+        StringComparison Cmp(XElement w) =>
+            ((string?)w.Attribute("ignore-case") ?? (map.IgnoreCase ? "true" : "false")) == "true"
+                ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         foreach (var w in map.Whens)
-            if ((string?)w.Attribute("from") == v)
+            if ((string?)w.Attribute("from") is { } from && v.Equals(from, Cmp(w)))
                 return (string?)w.Attribute("to") ?? "";
         foreach (var w in map.Whens)
         {
             string? prefix = (string?)w.Attribute("prefix");
-            if (prefix is not null && v.StartsWith(prefix, StringComparison.Ordinal))
+            if (prefix is not null && v.StartsWith(prefix, Cmp(w)))
                 return (string?)w.Attribute("to") ?? "";
         }
         // seg default wins over map default

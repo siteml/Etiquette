@@ -14,8 +14,14 @@ public sealed class PrinterDef
     public int Dpi { get; set; }
     public int WidthMils { get; set; }              // max print width
     public string Path { get; set; } = "driver";    // driver | zpl | tpcl | bpac
-    /// <summary>Dot pitch in mils (1000/dpi).</summary>
-    public double DotMils => Dpi > 0 ? 1000.0 / Dpi : 0;
+    /// <summary>Exact head density when the nominal dpi lies: a "203 dpi"
+    /// Zebra/Toshiba head is 8 dots/mm = 203.2 dpi. Optional; absent →
+    /// derived from Dpi. The editor's dot grid uses the effective value.</summary>
+    public double? DotsPerMm { get; set; }
+    /// <summary>Effective density in dots/mm (DotsPerMm, else Dpi / 25.4).</summary>
+    public double DotsPerMmEffective => DotsPerMm is double d && d > 0 ? d : Dpi / 25.4;
+    /// <summary>Dot pitch in mils (25.4 / dotsPerMm, i.e. 1000/dpi for a nominal head).</summary>
+    public double DotMils => DotsPerMmEffective > 0 ? 1000.0 / (25.4 * DotsPerMmEffective) : 0;
 }
 
 public sealed class MediaDef

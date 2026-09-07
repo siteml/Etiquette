@@ -17,6 +17,10 @@ public sealed class MainForm : Form
     private readonly Panel _dataPanel = new() { Dock = DockStyle.Fill, AutoScroll = true, Visible = false };
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _statusPos = new("x: -, y: -");
+    private readonly ToolStripStatusLabel _statusGrid = new("grid: off")
+        { IsLink = false, BorderSides = ToolStripStatusLabelBorderSides.Left, ToolTipText = "click: toggle snap to grid" };
+    private PointD? _lastCursor;
+    private string _viewKey = "";   // units+density stamp, to notify only on real change
     private readonly ToolStripStatusLabel _statusDoc = new("no document");
     private readonly ToolStripButton _modeButton = new("Mode: DESIGN") { CheckOnClick = true };
 
@@ -38,6 +42,11 @@ public sealed class MainForm : Form
     private CheckBox? _panelPrinterDefault;           // etiq:panel printer="embedded"
     private ComboBox? _panelPrinterBox;
     private System.Windows.Forms.Timer? _previewTimer; // debounced auto-preview
+    // entered data survives panel rebuilds (mode flips, F4 Apply) — the
+    // operator's entries belong to the SESSION, not to the panel instance.
+    // Cleared when another file is opened.
+    private readonly Dictionary<string, string> _panelMemoPrompts = new();
+    private readonly Dictionary<string, string> _panelMemoLists = new();
 
     // ---------- remote sources (etiq:source) ----------
     // machine connection store + session dataset override + one-row-per-
@@ -466,8 +475,16 @@ public sealed class MainForm : Form
 
         _status.Items.Add(_statusDoc);
         _status.Items.Add(new ToolStripStatusLabel { Spring = true });
+        _status.Items.Add(_statusGrid);
+        _statusGrid.Click += (_, _) =>
+        {
+            if (_doc is null || _modeButton.Checked) return;
+            if (_doc.View.GridPitchMils() > 0) ToggleView(v => v.SnapGrid = !v.SnapGrid, "toggle snap to grid");
+            else if (ViewDialogs.ShowGrid(this, _doc.View) is { } nv) ApplyView(nv, "grid settings");   // no grid yet: set one up
+        };
         _status.Items.Add(_statusPos);
         Controls.Add(_status);
+        UnitPrefs.DocView = () => _doc?.View;
 
         _canvas.SelectionChanged += o =>
         {
@@ -477,7 +494,20 @@ public sealed class MainForm : Form
             UpdateStatusInfo();
         };
         _canvas.CursorWorldMoved += p =>
-            _statusPos.Text = $"x: {p.X:0} mils  y: {p.Y:0} mils";
+        {
+            _lastCursor = p;
+            _statusPos.Text = $"x: {UnitPrefs.F(p.X)}  y: {UnitPrefs.FS(p.Y)}";
+        };
+        // display unit changed (View → Units / Options): re-render every
+        // number the operator can see; the document itself is untouched
+        UnitPrefs.Changed += () =>
+        {
+            if (_lastCursor is PointD lp)
+                _statusPos.Text = $"x: {UnitPrefs.F(lp.X)}  y: {UnitPrefs.FS(lp.Y)}";
+            _props.UnitsChanged();
+            UpdateStatusInfo();
+            _canvas.Invalidate();   // grid density preference may have changed
+        };
         _outline.AfterSelect += (_, e) =>
         {
             if (_syncingOutline) return; // we moved the highlight, not the user
@@ -603,8 +633,12 @@ public sealed class MainForm : Form
         var miBack = (ToolStripMenuItem)edit.DropDownItems.Add(
             "Send &Backward", null, (_, _) => Reorder(false));
         miBack.ShortcutKeys(Keys.Control | Keys.OemMinus);
+        edit.DropDownItems.Add(new ToolStripSeparator());
+        var miSnapAll = (ToolStripMenuItem)edit.DropDownItems.Add(
+            "Snap &All to Grid", null, (_, _) => SnapAllToGrid());
         edit.DropDownOpening += (_, _) =>
         {
+            miSnapAll.Enabled = _doc is not null && !_modeButton.Checked && _doc.View.GridPitchMils() > 0;
             bool doc = _doc is not null;
             bool design = doc && !_modeButton.Checked;
             miUndo.Enabled = design && _doc!.Undo.CanUndo;
@@ -648,18 +682,128 @@ public sealed class MainForm : Form
             "&Fit to Window", null, (_, _) => _canvas.FitToWindow());
         miFit.ShortcutKeys(Keys.Control | Keys.D0);
         view.DropDownItems.Add(new ToolStripSeparator());
+        // ---- grid / snapping / units (docs/grid-guides.md) ----
+        var miShowGrid = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Show &Grid", null, (_, _) => ToggleView(v => v.ShowGrid = !v.ShowGrid, "show grid"));
+        miShowGrid.ShortcutKeys(Keys.Control | Keys.Oem3);   // Ctrl+`
+        var miGridDlg = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Gri&d…", null, (_, _) =>
+            {
+                if (_doc is null) return;
+                if (ViewDialogs.ShowGrid(this, _doc.View) is { } nv) ApplyView(nv, "grid settings");
+            });
+        var miTarget = (ToolStripMenuItem)view.DropDownItems.Add(
+            "&Target Printer…", null, (_, _) =>
+            {
+                if (_doc is null) return;
+                if (ViewDialogs.ShowTarget(this, _doc.View) is { } nv) ApplyView(nv, "target printer");
+            });
+        view.DropDownItems.Add(new ToolStripSeparator());
+        // rulers + guides (per-operator visibility; guides themselves live in the template)
+        var miRulers = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Show &Rulers", null, (_, _) => { UnitPrefs.ShowRulers = !UnitPrefs.ShowRulers; _canvas.Invalidate(); });
+        miRulers.ShortcutKeys(Keys.Control | Keys.R);
+        var miGuides = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Show G&uides", null, (_, _) => { UnitPrefs.ShowGuides = !UnitPrefs.ShowGuides; _canvas.Invalidate(); });
+        miGuides.ShortcutKeys(Keys.Control | Keys.OemSemicolon);   // Ctrl+;
+        var miAddGuide = (ToolStripMenuItem)view.DropDownItems.Add(
+            "&Add Guide…", null, (_, _) => _canvas.AddGuideDialog());
+        var miLockGuides = (ToolStripMenuItem)view.DropDownItems.Add(
+            "&Lock Guides", null, (_, _) => ToggleView(v => v.GuidesLocked = !v.GuidesLocked, "lock guides"));
+        var miDelGuides = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Delete All Gui&des", null, (_, _) =>
+            {
+                if (_doc is null || _doc.View.Guides.Count == 0) return;
+                if (MessageBox.Show(this, $"Delete all {_doc.View.Guides.Count} guides?", "Guides",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    _canvas.DeleteAllGuides();
+            });
+        view.DropDownItems.Add(new ToolStripSeparator());
+        var miSnapGrid = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Snap to Gr&id", null, (_, _) => ToggleView(v => v.SnapGrid = !v.SnapGrid, "snap to grid"));
+        var miSnapGuides = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Snap to G&uides", null, (_, _) => ToggleView(v => v.SnapGuides = !v.SnapGuides, "snap to guides"));
+        var miSnapObjects = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Snap to &Objects", null, (_, _) => ToggleView(v => v.SnapObjects = !v.SnapObjects, "snap to objects"));
+        view.DropDownItems.Add(new ToolStripSeparator());
+        // display units — template override when a document is open
+        // (written to etiq:view), else the app default (Help → Options)
+        var unitsMenu = new ToolStripMenuItem("&Units");
+        void RebuildUnitsMenu()
+        {
+            unitsMenu.DropDownItems.Clear();
+            foreach (var (u, caption) in UnitPrefs.Choices(includeDots: UnitPrefs.DotsPerMm > 0))
+            {
+                var unit = u;
+                var mi = new ToolStripMenuItem(caption) { Checked = UnitPrefs.Current == unit };
+                mi.Click += (_, _) =>
+                {
+                    if (_doc is null) { UnitPrefs.Default = unit; return; }
+                    ToggleView(v => v.Units = unit, "display units");
+                };
+                unitsMenu.DropDownItems.Add(mi);
+            }
+            if (_doc is not null && _doc.View.Units is not null)
+            {
+                unitsMenu.DropDownItems.Add(new ToolStripSeparator());
+                unitsMenu.DropDownItems.Add("Use app default", null,
+                    (_, _) => ToggleView(v => v.Units = null, "display units"));
+            }
+        }
+        RebuildUnitsMenu();
+        unitsMenu.DropDownOpening += (_, _) => RebuildUnitsMenu();
+        view.DropDownItems.Add(unitsMenu);
+        view.DropDownItems.Add(new ToolStripSeparator());
         var miStation = (ToolStripMenuItem)view.DropDownItems.Add(
             "Enter Print-&Station Mode…", null, (_, _) => EnterStationMode());
         view.DropDownOpening += (_, _) =>
         {
             bool doc = _doc is not null;
+            bool design = doc && !_modeButton.Checked;
             _viewDesignItem!.Enabled = _viewDataItem!.Enabled = doc;
             miStation.Enabled = _doc?.Path is not null;   // needs a saved doc
+            var vs = _doc?.View;
+            bool hasGrid = design && vs is not null && vs.GridPitchMils() > 0;
+            miGridDlg.Enabled = miTarget.Enabled = design;
+            // no grid configured (or dots without a density) → nothing to show or snap to
+            miShowGrid.Enabled = miSnapGrid.Enabled = hasGrid;
+            miSnapGuides.Enabled = miSnapObjects.Enabled = design;
+            miRulers.Checked = UnitPrefs.ShowRulers;
+            miGuides.Checked = UnitPrefs.ShowGuides;
+            miRulers.Enabled = miGuides.Enabled = design;
+            miAddGuide.Enabled = design;
+            miLockGuides.Enabled = design && (vs?.Guides.Count ?? 0) > 0;
+            miLockGuides.Checked = vs?.GuidesLocked ?? false;
+            miDelGuides.Enabled = design && (vs?.Guides.Count ?? 0) > 0;
+            miSnapGuides.Enabled = design && UnitPrefs.ShowGuides;
+            miShowGrid.Checked = vs?.ShowGrid ?? true;
+            miSnapGrid.Checked = vs?.SnapGrid ?? true;
+            miSnapGuides.Checked = vs?.SnapGuides ?? true;
+            miSnapObjects.Checked = vs?.SnapObjects ?? true;
         };
+
+        // screen redaction for remote demos: stand-ins for data-sensitive
+        // elements everywhere the editor echoes content; printing untouched
+        view.DropDownItems.Add(new ToolStripSeparator());
+        var miRedact = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Redact &Sensitive", null, (_, _) =>
+            {
+                UnitPrefs.Redact = !UnitPrefs.Redact;
+                _canvas.Invalidate();
+                RefreshOutline();
+                _props.RefreshValues();
+                if (_modeButton.Checked) BuildDataPanel();
+                UpdateStatusInfo();
+            });
+        miRedact.ShortcutKeys(Keys.Control | Keys.Shift | Keys.R);
+        view.DropDownOpening += (_, _) => miRedact.Checked = UnitPrefs.Redact;
 
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add("Check for &Updates…", null, async (_, _) => await CheckForUpdates(interactive: true));
         help.DropDownItems.Add("&Options…", null, (_, _) => UpdateDialogs.ShowOptions(this));
+        help.DropDownItems.Add("Last &Print Details…", null, (_, _) =>
+            MessageBox.Show(this, PrintService.LastInfo ?? "Nothing printed yet this session.",
+                "Last print", MessageBoxButtons.OK, MessageBoxIcon.Information));
         help.DropDownItems.Add(new ToolStripSeparator());
         help.DropDownItems.Add("&About Etiquette…", null, (_, _) => ShowAbout());
 
@@ -696,9 +840,11 @@ public sealed class MainForm : Form
     private void FileNew()
     {
         if (!ConfirmDiscard()) return;
-        using var dlg = new NewLabelDialog();
+        using var dlg = UnitPrefs.Current == DisplayUnit.Mm
+            ? new NewLabelDialog(100, 50, "mm", resize: false)
+            : new NewLabelDialog(4, 2, "in", resize: false);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        int w = dlg.WidthMils, h = dlg.HeightMils;
+        string w = Num.F(dlg.WidthMils), h = Num.F(dlg.HeightMils);
         string xml = $"""
             <?xml version="1.0" encoding="UTF-8"?>
             <svg xmlns="http://www.w3.org/2000/svg"
@@ -753,7 +899,7 @@ public sealed class MainForm : Form
         var phys = _doc.PhysicalSize ?? (vb.W / 1000.0, vb.H / 1000.0, "in");
         using var dlg = new NewLabelDialog(phys.W, phys.H, phys.Unit, resize: true);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        if (dlg.WidthMils == (int)Math.Round(vb.W) && dlg.HeightMils == (int)Math.Round(vb.H) &&
+        if (Math.Abs(dlg.WidthMils - vb.W) < 1e-6 && Math.Abs(dlg.HeightMils - vb.H) < 1e-6 &&
             dlg.WidthAttr == (string?)_doc.Root.Attribute("width") &&
             dlg.HeightAttr == (string?)_doc.Root.Attribute("height")) return;
         _doc.SetLabelSize(dlg.WidthAttr, dlg.HeightAttr, dlg.WidthMils, dlg.HeightMils);
@@ -789,7 +935,7 @@ public sealed class MainForm : Form
         var vb = _canvas.Doc!.ViewBox;
         double cx = vb.X + vb.W / 2, cy = vb.Y + vb.H / 2;
         var ns = _doc.Root.Name.Namespace;
-        string N(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        string N(double v) => Num.F(v);
 
         System.Xml.Linq.XElement el = kind switch
         {
@@ -900,6 +1046,7 @@ public sealed class MainForm : Form
         _doc = null;
         _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();
         _canvas.Doc = null;          // fires SelectionChanged(null) → inspector clears
+        SyncViewDependents(force: true);
         RefreshOutline();
         if (_modeButton.Checked) BuildDataPanel();   // empties the data pane
         UpdateStatusInfo();
@@ -939,9 +1086,11 @@ public sealed class MainForm : Form
         _canvas.Doc = _doc;
         _doc.Undo.Changed += OutlineMaybeRefresh; // deletes/undo/redo update the tree
         RefreshDeclaredFieldNames();
+        SyncViewDependents(force: true);
         UpdateStatusInfo();
         UpdateTitle();
         _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();                 // rows belong to the previous doc
+        _panelMemoPrompts.Clear(); _panelMemoLists.Clear();               // so do the operator's entries
         PushRecent(path);
         RefreshOutline();
         if (_modeButton.Checked) BuildDataPanel();
@@ -1024,6 +1173,15 @@ public sealed class MainForm : Form
         if (_doc is null) return;
         using var measurer = new GdiTextMeasurer();
         PrintService.Print(this, _doc, _canvas.ResolvedValues, measurer);
+        ShowPrintInfo();
+    }
+
+    /// <summary>Echo PrintService.LastInfo (paging diagnostics) where the
+    /// operator can see it: the data-panel status line, else the status bar.</summary>
+    private void ShowPrintInfo()
+    {
+        if (PrintService.LastInfo is not { } info) return;
+        _statusDoc.Text = info;   // survives until the next size/selection change; Help → Last Print Details… keeps it
     }
 
     /// <summary>Effective printer for direct printing: embedded picker
@@ -1051,6 +1209,7 @@ public sealed class MainForm : Form
         var pages = Enumerable.Repeat(_canvas.ResolvedValues, Math.Max(1, copies)).ToList();
         PrintService.PrintBatch(this, _doc, pages, measurer,
             direct: panel.Print == "direct", printer: PanelPrinter(panel));
+        ShowPrintInfo();
     }
 
     private void ShowMetadataDialog()
@@ -1206,6 +1365,69 @@ public sealed class MainForm : Form
     /// the document, its path, or its content changes; cheap enough that
     /// over-calling is fine. (When tabs arrive, this string moves to the
     /// tab header and the titlebar shows the active tab's.)</summary>
+    // ---- view state helpers (grid / snapping / units) ----
+
+    /// <summary>Mutate a clone of the view settings and install it as one
+    /// undo step.</summary>
+    private void ToggleView(Action<ViewSettings> change, string label)
+    {
+        if (_doc is null) return;
+        var v = _doc.View.Clone();
+        change(v);
+        ApplyView(v, label);
+    }
+
+    private void ApplyView(ViewSettings v, string label)
+    {
+        if (_doc is null) return;
+        _doc.SetView(v, label);      // Undo.Changed → OutlineMaybeRefresh → SyncViewDependents
+        SyncViewDependents();
+        _canvas.Invalidate();
+    }
+
+    /// <summary>After anything that may have changed etiq:view (edit, undo,
+    /// document switch): refresh the grid status segment, repaint, and — only
+    /// when the effective unit or density really changed — tell the unit
+    /// listeners (inspector rebuild is not free).</summary>
+    private void SyncViewDependents(bool force = false)
+    {
+        var v = _doc?.View;
+        string key = $"{UnitPrefs.Current}|{UnitPrefs.DotsPerMm}";
+        if (force || key != _viewKey)
+        {
+            _viewKey = key;
+            UnitPrefs.NotifyChanged();
+        }
+        _statusGrid.Text = v is null ? "grid: off" : GridStatus(v);
+        _statusGrid.ForeColor = v is not null && v.IsDotGrid && v.DotsPerMm <= 0
+            ? Color.Firebrick : SystemColors.ControlText;
+        _canvas.Invalidate();
+    }
+
+    private static string GridStatus(ViewSettings v)
+    {
+        if (v.GridOff) return "grid: off";
+        string snap = v.SnapGrid ? "" : " (no snap)";
+        if (v.IsDotGrid)
+            return v.DotsPerMm > 0
+                ? $"grid: dots @ {Num.F(Math.Round(v.DotsPerMm, 3))}/mm" +
+                  (string.IsNullOrWhiteSpace(v.Target) ? "" : $" ({v.Target})") + snap
+                : "grid: dots — no target density";
+        double p = v.GridPitchMils();
+        return p > 0 ? $"grid: {UnitPrefs.FS(p)}{snap}" : "grid: (invalid)";
+    }
+
+    private void SnapAllToGrid()
+    {
+        if (_doc is null) return;
+        var (n, skipped) = _doc.SnapAllToGrid(_canvas.Measurer);
+        _canvas.Invalidate();
+        string msg = n == 0 ? "Nothing to snap — everything is already on the grid."
+                            : $"{n} object{(n == 1 ? "" : "s")} snapped to the grid.";
+        if (skipped > 0) msg += $"\n{skipped} rotated object{(skipped == 1 ? "" : "s")} skipped.";
+        MessageBox.Show(this, msg, "Snap All to Grid", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
     /// <summary>The status-bar slot the filename used to occupy (it lives
     /// in the titlebar now): label size, then the selection — kind and
     /// size/position of one object, or a count. What you're editing and
@@ -1214,7 +1436,7 @@ public sealed class MainForm : Form
     {
         if (_doc is null) { _statusDoc.Text = "no document"; return; }
         var vb = _doc.ViewBox;
-        string info = $"{vb.W / 1000.0:0.##} × {vb.H / 1000.0:0.##} in";
+        string info = (UnitPrefs.Redact ? "REDACTED    |    " : "") + $"{UnitPrefs.F(vb.W)} × {UnitPrefs.FS(vb.H)}";
         var sel = _canvas.Selection;
         if (sel.Count == 1)
         {
@@ -1222,7 +1444,8 @@ public sealed class MainForm : Form
             try
             {
                 var b = o.Bounds();
-                info += $"    |    {o.Kind}: {b.W:0} × {b.H:0} mils @ ({b.X:0}, {b.Y:0})";
+                info += $"    |    {o.Kind}: {UnitPrefs.F(b.W)} × {UnitPrefs.FS(b.H)}" +
+                        $" @ ({UnitPrefs.F(b.X)}, {UnitPrefs.F(b.Y)})";
             }
             catch { info += $"    |    {o.Kind}"; }
         }
@@ -1243,6 +1466,7 @@ public sealed class MainForm : Form
     private void OutlineMaybeRefresh()
     {
         UpdateTitle();   // undo/redo/edits all pass through here
+        SyncViewDependents();   // etiq:view may have changed (grid/units/density, undo of them)
         UpdateStatusInfo();  // size / selection bounds may have changed with them
         if (OutlineSignature() != _outlineSig) RefreshOutline();
         // ShowSelection is now cheap when nothing structural changed (it
@@ -1311,12 +1535,16 @@ public sealed class MainForm : Form
         string? field = (string?)o.El.Attribute("data-field");
         return o.Kind switch
         {
-            ObjectKind.Text => $"Text: {(field is not null ? "{" + field + "}" : Snip(o.El.Value))}",
+            ObjectKind.Text => $"Text: {(field is not null ? "{" + field + "}" : Snip(Shown(o.El.Value)))}",
             ObjectKind.Barcode => $"Barcode ({(string?)o.El.Attribute("data-barcode")}): " +
-                                  (field is not null ? "{" + field + "}" : Snip((string?)o.El.Attribute("data-value") ?? "")),
+                                  (field is not null ? "{" + field + "}" : Snip(Shown((string?)o.El.Attribute("data-value") ?? ""))),
             _ => o.Kind.ToString(),
         };
         static string Snip(string s) => s.Length > 18 ? s[..18] + "…" : s;
+        string Shown(string real) =>
+            UnitPrefs.Redact && Redaction.IsSensitive(o.El) ? Redaction.Display(o.El, real) : real;
+        // (field-level flags need no outline handling: a bound element is
+        // already captioned {Field}, never with its content)
     }
 
     /// <summary>True while WE move the outline highlight to mirror a canvas
@@ -1564,8 +1792,19 @@ public sealed class MainForm : Form
         else
         {
             _canvas.ResolvedValues = null;
+            _canvas.DisplayValues = null;
         }
         _canvas.Invalidate();
+    }
+
+    /// <summary>Put the caret in the first control that accepts entry
+    /// (panel order) — Clear should leave the operator ready to type,
+    /// not reaching for the mouse.</summary>
+    private void FocusFirstInput()
+    {
+        _dataPanel.Controls.OfType<Control>()
+            .FirstOrDefault(c => c is TextBox { ReadOnly: false } or ComboBox && c.Enabled && c.Visible)
+            ?.Focus();
     }
 
     private void BuildDataPanel()
@@ -1579,6 +1818,8 @@ public sealed class MainForm : Form
         // panel was scrolled (or after opening another file in Data mode)
         // lands everything outside the viewport and the pane looks empty.
         _dataPanel.AutoScrollPosition = Point.Empty;
+        foreach (var (k, tb) in _promptBoxes) _panelMemoPrompts[k] = tb.Text;
+        foreach (var (k, cb) in _listCombos) _panelMemoLists[k] = cb.Text;
         var old = _dataPanel.Controls.Cast<Control>().ToList();
         _dataPanel.Controls.Clear();          // Clear does NOT dispose
         foreach (var c in old) c.Dispose();
@@ -1663,6 +1904,8 @@ public sealed class MainForm : Form
             };
             if (f.Source == "prompt" && f.Default is { Length: > 0 } dflt)
                 tb.Text = dflt;   // prefill; Clear restores it too
+            if (_panelMemoPrompts.TryGetValue(f.Name, out var memo))
+                tb.Text = memo;   // this session's entry survives rebuilds
             tb.TextChanged += (_, _) => Touched();
             // remote sources gate on focus (see FetchSourceColumn): leaving
             // the box is the "entry done" signal, so refresh again then
@@ -1683,6 +1926,7 @@ public sealed class MainForm : Form
                 AutoCompleteMode = AutoCompleteMode.SuggestAppend,
                 AutoCompleteSource = AutoCompleteSource.ListItems,
             };
+            if (_panelMemoLists.TryGetValue(l.Name, out var lmemo)) cb.Text = lmemo;
             _listCombos[l.Name] = cb;
             RebuildListItems(template, l, cb);
             cb.SelectedIndexChanged += (_, _) => Touched();
@@ -1841,7 +2085,9 @@ public sealed class MainForm : Form
                                     f.Name == name && f.Source == "prompt")?.Default ?? "";
                             // pick lists RESET (default / first row), never blank
                             foreach (var cb in _listCombos.Values) cb.Text = cb.Tag as string ?? "";
+                            _panelMemoPrompts.Clear(); _panelMemoLists.Clear();
                             RefreshPreview(template);
+                            FocusFirstInput();
                         });
                         break;
                 }
@@ -2086,15 +2332,20 @@ public sealed class MainForm : Form
         string prevText = cb.Text;
         var map = new Dictionary<string, string>();
         _listDisplayToKey[l.Name] = map;
+        // screen redaction: a list feeding a sensitive field shows "Item n"
+        // rows — still pickable, nothing readable (View → Redact Sensitive)
+        bool mask = UnitPrefs.Redact && _doc is not null &&
+                    Redaction.SensitiveLists(_doc.Root, Redaction.AllSensitiveFields(_doc.Root)).Contains(l.Name);
         cb.BeginUpdate();
         cb.Items.Clear();
-        int noKey = 0;
+        int noKey = 0, n = 0;
         foreach (var row in rows)
         {
             if (!row.TryGetValue(l.Key, out var kv) || string.IsNullOrWhiteSpace(kv)) { noKey++; continue; }
             if (l.FilterColumn is not null && !string.IsNullOrEmpty(filterVal) &&
                 row.GetValueOrDefault(l.FilterColumn) != filterVal) continue;
-            string display = ListRowDisplay(template, l, row, kv);
+            n++;
+            string display = mask ? $"Item {n}" : ListRowDisplay(template, l, row, kv);
             if (!map.TryAdd(display, kv))
             {
                 display = $"{display} ({kv})";   // duplicate display text: disambiguate
@@ -2277,7 +2528,8 @@ public sealed class MainForm : Form
     }
 
     private ResolveContext BuildResolveContext(Dictionary<string, string>? listOverride = null,
-                                               bool remote = true)
+                                               bool remote = true,
+                                               IReadOnlyDictionary<string, string>? substitutes = null)
     {
         string counterFile = Path.Combine(Path.GetTempPath(), "etiqedit-preview-counters.json");
         // parsed ONCE per context — the SourceColumn lambda runs per column
@@ -2306,8 +2558,32 @@ public sealed class MainForm : Form
             // the lambda runs after ctx is assigned — safe self-reference
             SourceColumn = tmpl is null || !remote ? null
                 : (src, col) => FetchSourceColumn(tmpl, ctx, focused, src, col),
+            Substitutes = substitutes,
         };
         return ctx;
+    }
+
+    /// <summary>Second, DISPLAY-ONLY resolve with sensitive fields replaced
+    /// by their stand-ins (View → Redact Sensitive). Remote columns come
+    /// from the same per-source cache the real resolve just filled, so this
+    /// costs no extra fetch. Null when redaction is off or it fails — the
+    /// canvas then falls back to the real values.</summary>
+    private IReadOnlyDictionary<string, string>? RedactedDisplay(EtiqTemplate template, ResolveContext realCtx)
+    {
+        if (!UnitPrefs.Redact || _doc is null) return null;
+        var subs = Redaction.Substitutes(_doc.Root);
+        if (subs.Count == 0) return null;
+        try
+        {
+            var ctx = new ResolveContext
+            {
+                PromptValues = realCtx.PromptValues, ListSelections = realCtx.ListSelections,
+                ListRows = realCtx.ListRows, Counters = realCtx.Counters, EpicorColumn = realCtx.EpicorColumn,
+                Rest = realCtx.Rest, SourceColumn = realCtx.SourceColumn, Substitutes = subs,
+            };
+            return new FieldResolver(template, ctx).ResolveAll();
+        }
+        catch (ResolveException) { return null; }
     }
 
     private bool _previewBusy, _previewAgain;
@@ -2362,12 +2638,15 @@ public sealed class MainForm : Form
                 return;
             }
             _canvas.ResolvedValues = resolved;
+            _canvas.DisplayValues = RedactedDisplay(template, ctx);
             _canvas.Invalidate();
+            var sensitive = UnitPrefs.Redact && _doc is not null
+                ? Redaction.AllSensitiveFields(_doc.Root) : new HashSet<string>();
             foreach (var f in template.Fields)
                 if (f.Source is ("epicor" or "rest") && f.Override &&
                     _promptBoxes.TryGetValue(f.Name, out var box) &&
                     resolved.TryGetValue(f.Name, out var rv))
-                    box.PlaceholderText = rv == "" ? "(from source)" : rv;
+                    box.PlaceholderText = rv == "" ? "(from source)" : sensitive.Contains(f.Name) ? "•••••" : rv;
             if (_dataStatus is not null)
             {
                 _dataStatus.ForeColor = SystemColors.GrayText;
@@ -2388,8 +2667,10 @@ public sealed class MainForm : Form
     {
         try
         {
-            var resolved = new FieldResolver(template, BuildResolveContext()).ResolveAll();
+            var ctx = BuildResolveContext();
+            var resolved = new FieldResolver(template, ctx).ResolveAll();
             _canvas.ResolvedValues = resolved;
+            _canvas.DisplayValues = RedactedDisplay(template, ctx);
             _canvas.Invalidate();
             // re-filter pickers whose filter-ref value changed with this edit
             foreach (var l in template.Lists)
@@ -2676,8 +2957,8 @@ public sealed class NewLabelDialog : Form
     private double Wv => (double)_w.Value;
     private double Hv => (double)_h.Value;
 
-    public string WidthAttr => $"{Wv:0.###}{Unit}";
-    public string HeightAttr => $"{Hv:0.###}{Unit}";
-    public int WidthMils => (int)Math.Round(Unit == "mm" ? Wv * 1000 / 25.4 : Wv * 1000);
-    public int HeightMils => (int)Math.Round(Unit == "mm" ? Hv * 1000 / 25.4 : Hv * 1000);
+    public string WidthAttr => Num.F(Wv) + Unit;
+    public string HeightAttr => Num.F(Hv) + Unit;
+    public double WidthMils => Unit == "mm" ? Wv * 1000 / 25.4 : Wv * 1000;
+    public double HeightMils => Unit == "mm" ? Hv * 1000 / 25.4 : Hv * 1000;
 }

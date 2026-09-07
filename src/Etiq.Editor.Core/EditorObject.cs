@@ -175,7 +175,7 @@ public sealed class EditorObject
 
     // ---- undoable edits ----
 
-    private static string N(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+    private static string N(double v) => Num.F(v);
 
     /// <summary>Translate by (dx,dy). Mergeable: consecutive moves of the
     /// same object collapse into one undo step (a drag = one undo).</summary>

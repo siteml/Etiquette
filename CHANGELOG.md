@@ -4,6 +4,100 @@ All notable changes to Etiquette are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver
 (pre-1.0: minor bumps may change behavior).
 
+## [0.10.0] — 2026-09-07
+
+### Added
+- **Redact Sensitive** (View, Ctrl+Shift+R) — for remote demos. Flag a
+  FIELD "Sensitive" on the F4 Fields tab (optional stand-in text): while
+  redaction is on it resolves to the stand-in (else the bound element's
+  placeholder) everywhere the editor shows it — including inside compose
+  fields, so a title built from `{CoName}` + a literal redacts only the
+  name — and pick lists feeding it show "Item n" rows. Static text (a
+  hard-coded company name) is marked on the object instead
+  (`data-sensitive`, block mask or stand-in). Canvas, outline, inspector
+  and the data panel's pulled-value echoes all follow; printing is never
+  affected — the real resolve is kept separately for the print path.
+  Status bar shows REDACTED while active.
+- **Inkscape guides, stroke dot snap, density check** — a template with
+  no `etiq:view` picks up Inkscape's `sodipodi:guide`s read-only (axis-
+  aligned only; the namedview is never written). The inspector shows a
+  box's or line's stroke in printer dots with a **Snap** button (whole
+  dots, min 1) once the template knows its head density. Printing from
+  the dialog compares the driver's reported resolution with the
+  template's `dots-per-mm` and warns before printing at a different
+  density — a numeric check, never a printer-name match. Final pass of
+  `docs/grid-guides.md`.
+- **Rulers and guides** — rulers along the canvas top/left in the display
+  unit (Ctrl+R), with a cursor hairline. Drag out of a ruler to create a
+  guide, drag a guide to move it, drag it back onto its ruler to delete
+  it; double-click for exact position/name, right-click for
+  edit/delete/lock. View → Add Guide… places one by typing. Guides are
+  magnetic snap targets (own toggle, independent of object snapping; a
+  hidden guide never snaps), snap to the grid and object edges while
+  being dragged, are stored per template in `etiq:view` (positions in
+  mils), lockable, and every change is one undo step. Design mode only.
+  Third pass of `docs/grid-guides.md`.
+- **Grid, dot snapping and view state** — View → Grid… sets a manual
+  pitch (`0.05in`, `1mm`, `50mils`) or **printer dots**; View → Target
+  Printer… picks the head density from `config/printers.json` (new
+  optional `dotsPerMm` per printer — a "203 dpi" Zebra head is really 8
+  dots/mm) or a custom value. The template stores the physics
+  (`dots-per-mm`), never a printer name. Grid draws adaptively (thins out
+  at low zoom; a heavier line every Nth cell for counting — 10 by
+  default, 8 for dots, adjustable in Options), Design mode only.
+  Options → "Grid lines on screen" (fine/normal/coarse/sparse) sets how
+  close drawn lines may get before the canvas thins them — a personal
+  preference, not template state; snapping always uses the true pitch.
+  Snap to Grid / Guides / Objects are independent toggles; with a dot grid
+  the magnetic object snap is re-rounded so edges stay on whole dots.
+  Edit → Snap All to Grid re-rounds every unrotated object (one undo;
+  rotated ones counted and skipped). Status bar shows the grid state
+  (click = toggle snap). All of it lives in a new `etiq:view` element
+  (`docs/convention.md`) that engines ignore and that is only written once
+  you touch a view setting; a template's `units=` overrides the app
+  default. Grid moves now snap positions onto the lattice (absolute), not
+  the drag delta. Second pass of `docs/grid-guides.md`.
+- **Display units** — View → Units (also in Help → Options) switches
+  what the status bar, selection info and inspector geometry rows show
+  and accept: inches (default), millimetres or mils. The template's
+  coordinates stay mils; this is a view choice, like Inkscape's document
+  units. Inspector length boxes take a typed suffix regardless of the
+  current unit (`12mm`, `0.5in`, `40mils`, `2"`, `72pt`) and nudge by one
+  display tick (0.01 in / 0.1 mm / 1 mil; Shift = ×10). **Font sizes
+  are shown and entered in points** (1 pt = 13.889 mils) whatever the
+  display unit — inspector rows and the canvas Font Size… prompt; a
+  typed `mils`/`mm` suffix still works. New Label defaults to
+  100 × 50 mm when the display unit is mm. First pass of
+  `docs/grid-guides.md`.
+
+### Fixed
+- **Fields tab: typing a name no longer rebuilds the whole pane** — each
+  keystroke relabelled the list entry, which WinForms implements as a
+  remove + re-insert and which fired a selection change, so the editor
+  pane was torn down and rebuilt per character (caret lost, every row
+  refreshed). The relabel is now silent; only the list entry updates.
+  Maps, Lists and Queries now relabel their list entry live while the
+  name is typed, too (they only did so on leaving the entry).
+
+### Changed
+- **Proof prints on office printers** — a sheet printer (default form
+  A5 or larger) cannot make a label-sized page; asked for one it parked
+  the label at the sheet's edge with part of it in the unprintable
+  margin. Now the sheet is kept in the label's own orientation (a wide
+  label prints landscape, as it would on stock), the label is placed
+  top-left of the printable area (so any paper size works) and a dashed
+  cut outline is drawn around it. Label and tape
+  printers are unaffected.
+- **Lossless coordinates** — every number the editor writes into a
+  template (positions, sizes, rotations, viewBox, label width/height)
+  now goes through one formatter (`Num.F`, 9 decimals, invariant
+  culture) instead of three-decimal rounding. Inch-designed templates
+  are unaffected (values stay integers); metric sizes such as 25 mm
+  (984.251968504 mils) and printer dot pitches (1000/203.2) now
+  round-trip exactly. The label-size dialog no longer rounds mm sizes to
+  whole mils. Also fixes a latent decimal-comma bug in a few
+  canvas-side writes that used the current culture.
+
 ## [0.9.0] — 2026-09-04
 
 ### Added

@@ -84,7 +84,7 @@ public static class UpdateDialogs
     {
         using var f = new Form
         {
-            Text = "Options", ClientSize = new Size(450, 276),
+            Text = "Options", ClientSize = new Size(450, 380),
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
@@ -133,6 +133,53 @@ public static class UpdateDialogs
             Left = 150, Top = 122, Width = 70, Minimum = 1, Maximum = 30,
             Value = MainForm.RecentMax,
         };
+        // display units (mirrors View → Units): what the status bar,
+        // inspector and dialogs show; the template's coordinates stay mils
+        var unitsLbl = new Label { Text = "Default units:", Left = 240, Top = 126, Width = 90 };
+        var units = new ComboBox
+        {
+            Left = 330, Top = 122, Width = 84, DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        foreach (var (u, _) in UnitPrefs.Choices(false)) units.Items.Add(Etiq.Editor.Core.Units.Suffix(u));
+        units.SelectedItem = Etiq.Editor.Core.Units.Suffix(UnitPrefs.Default);
+        // on-screen grid density: how close drawn grid lines may get before
+        // the canvas thins them out (snapping is unaffected)
+        var gridLbl = new Label { Text = "Grid lines on screen:", Left = 14, Top = 232, Width = 130 };
+        var gridPx = new ComboBox
+        {
+            Left = 150, Top = 228, Width = 264, DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        foreach (var (_, cap) in UnitPrefs.GridDensityChoices) gridPx.Items.Add(cap);
+        gridPx.SelectedIndex = Math.Max(0, Array.FindIndex(UnitPrefs.GridDensityChoices, c => c.Px == UnitPrefs.GridMinPx));
+        var majorLbl = new Label { Text = "Heavy line every:", Left = 14, Top = 266, Width = 130 };
+        var gridMajor = new NumericUpDown
+        {
+            Left = 150, Top = 262, Width = 50, Minimum = 0, Maximum = 100, Value = UnitPrefs.GridMajor,
+        };
+        var majorMode = new ComboBox
+        {
+            Left = 206, Top = 262, Width = 208, DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        majorMode.Items.AddRange(new object[]
+        {
+            "grid cells (fixed distance)",
+            "drawn lines (follows zoom)",
+        });
+        majorMode.SelectedIndex = UnitPrefs.GridMajorAdaptive ? 1 : 0;
+        var sheetLbl = new Label { Text = "Proof orientation:", Left = 14, Top = 300, Width = 130 };
+        var sheetOrient = new ComboBox
+        {
+            Left = 150, Top = 296, Width = 264, DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        sheetOrient.Items.AddRange(new object[] { "match the label (default)", "always portrait", "always landscape" });
+        sheetOrient.SelectedIndex = UnitPrefs.SheetOrientation switch { "portrait" => 1, "landscape" => 2, _ => 0 };
+        var tip = new ToolTip();
+        tip.SetToolTip(gridMajor, "0 = automatic (10; 8 on a dot grid)");
+        tip.SetToolTip(sheetOrient, "Office (sheet) printers only — label printers always print the label's own orientation");
+        tip.SetToolTip(majorMode,
+            "fixed: N cells = a physical distance, zoom only thins the minors\n" +
+            "follows zoom: as minors thin out the heavy lines thin with them,\n" +
+            "so there are always N visible cells per heavy square");
         // print offset, PER PRINTER: nudge that printer's output by (x, y)
         // mils — a driver that mis-reports its hard margin puts the image a
         // hair off; the correction belongs to the printer, not the machine
@@ -180,11 +227,11 @@ public static class UpdateDialogs
         }
         catch { if (offPrinter.Items.Count > 0) offPrinter.SelectedIndex = 0; }
         LoadOffset();
-        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 246, Top = 236, Width = 80 };
-        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 334, Top = 236, Width = 80 };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 246, Top = 340, Width = 80 };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 334, Top = 340, Width = 80 };
         f.Controls.AddRange(new Control[]
-            { auto, flavorLbl, flavor, skipLbl, clear, recentLbl, recentNum,
-              offLbl, offPrinter, offX, offXl, offY, offYl, ok, cancel });
+            { auto, flavorLbl, flavor, skipLbl, clear, recentLbl, recentNum, unitsLbl, units,
+              offLbl, offPrinter, offX, offXl, offY, offYl, gridLbl, gridPx, majorLbl, gridMajor, majorMode, sheetLbl, sheetOrient, ok, cancel });
         f.AcceptButton = ok;
         f.CancelButton = cancel;
         if (f.ShowDialog(owner) == DialogResult.OK)
@@ -193,6 +240,11 @@ public static class UpdateDialogs
             UpdateChecker.UpdateFlavor = flavor.SelectedIndex switch
             { 1 => "standalone", 2 => "framework", _ => "auto" };
             UpdateChecker.SetSetting("recentMax", ((int)recentNum.Value).ToString());
+            UnitPrefs.Default = Etiq.Editor.Core.Units.Parse(units.SelectedItem as string);
+            if (gridPx.SelectedIndex >= 0) UnitPrefs.GridMinPx = UnitPrefs.GridDensityChoices[gridPx.SelectedIndex].Px;
+            UnitPrefs.GridMajor = (int)gridMajor.Value;
+            UnitPrefs.GridMajorAdaptive = majorMode.SelectedIndex == 1;
+            UnitPrefs.SheetOrientation = sheetOrient.SelectedIndex switch { 1 => "portrait", 2 => "landscape", _ => "label" };
             foreach (var (pn, (x, y)) in edited) PrintService.SetOffset(pn, x, y);
         }
     }

@@ -6,6 +6,8 @@ using System.Xml.Linq;
 using Etiq.Btw;
 #endif
 using Etiq.Core;
+using EU = Etiq.Editor.Core.Units;
+using DU = Etiq.Editor.Core.DisplayUnit;
 
 // Etiq.Tests - dependency-free test runner (no xunit; locked-down machines).
 // Run: dotnet run --project tests/Etiq.Tests [-- <repoRoot>]
@@ -1062,7 +1064,7 @@ Check("snippets: load, collision rename + ref rewrite, package transitive", () =
 {
     // load the SHIPPED snippets (repo /snippets) and materialize into a
     // template that already uses one of the names
-    var snips = SnippetLibrary.Load("snippets");
+    var snips = SnippetLibrary.Load(Path.Combine(repoRoot, "snippets"));
     Assert(snips.Count >= 2, "shipped snippets found");
     var intl = snips.First(s => s.Name.Contains("International"));
 
@@ -1269,7 +1271,7 @@ Check("variants: multi-value when + switch on a normalizing compose helper", () 
 
 Check("shipped comprehensive intl snippet: groups, aliases, unknowns", () =>
 {
-    var snips = SnippetLibrary.Load("snippets");
+    var snips = SnippetLibrary.Load(Path.Combine(repoRoot, "snippets"));
     var intl = snips.First(s => s.Name.Contains("International"));
     var ns = EtiqTemplate.Ns;
     var label = new XElement(ns + "label",
@@ -1497,7 +1499,302 @@ Check("editor: fit modes + top-edge drag on a data-height box", () =>
     doc2.Undo.Push(e.Resize(new(eb.X, eb.Y, eb.W, eb.H + 150)));
     AssertEq("200", (string?)e.El.Attribute("font-size") ?? "200", "fit=none: font untouched by vertical drag");
     AssertEq(N0(eb.H + 150), (string?)e.El.Attribute("data-height"), "fit=none: drag sizes the clip box");
-    static string N0(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+    static string N0(double v) => Etiq.Editor.Core.Num.F(v);
+});
+
+Check("Num.F: metric and dot-pitch values round-trip, float noise trimmed", () =>
+{
+    var inv = System.Globalization.CultureInfo.InvariantCulture;
+    // 25 mm in mils is 5000/127 * 25 — a non-terminating decimal; nine
+    // decimals must bring it back to 25.000 mm exactly at any sane display precision.
+    double mm25 = 25 * 1000 / 25.4;
+    string s = Etiq.Editor.Core.Num.F(mm25);
+    double back = double.Parse(s, inv) * 0.0254;
+    AssertEq("25.000000", back.ToString("0.000000", inv), "25 mm round-trip via mils text");
+    AssertEq("984.251968504", s, "25 mm serialized");
+    // 203.2 dpi pitch
+    AssertEq("4.921259843", Etiq.Editor.Core.Num.F(1000 / 203.2), "dot pitch serialized");
+    // grid arithmetic noise never reaches the file
+    AssertEq("1250", Etiq.Editor.Core.Num.F(1249.9999999999998), "float noise trimmed");
+    // culture-proof
+    var prev = System.Globalization.CultureInfo.CurrentCulture;
+    try
+    {
+        System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+        AssertEq("12.5", Etiq.Editor.Core.Num.F(12.5), "invariant decimal point under de-DE");
+    }
+    finally { System.Globalization.CultureInfo.CurrentCulture = prev; }
+});
+
+Check("Units: mils <-> in/mm/dots conversion, formatting, suffix parsing", () =>
+{
+    var inv = System.Globalization.CultureInfo.InvariantCulture;
+    AssertEq("1.25", EU.Format(1250, DU.In), "in format");
+    AssertEq("25.4", EU.Format(1000, DU.Mm), "mm format");
+    AssertEq("1250", EU.Format(1250, DU.Mils), "mils format");
+    AssertEq("984.25", EU.Format(984.251968504, DU.Mils), "fractional mils shown");
+    AssertEq("200", EU.Format(200 * EU.DotPitchMils(8), DU.Dots, 8), "dots format");
+    AssertEq("1000", EU.Format(1000, DU.Dots, 0), "dots w/o density falls back to mils");
+    AssertEq("0", EU.Format(-0.0001, DU.In), "no -0");
+
+    double m;
+    Assert(EU.TryParseLength("1.5", DU.In, out m) && Math.Abs(m - 1500) < 1e-9, "bare in");
+    Assert(EU.TryParseLength("12mm", DU.In, out m) && Math.Abs(m - 12 * EU.MilsPerMm) < 1e-9, "mm suffix overrides");
+    Assert(EU.TryParseLength("40 mils", DU.Mm, out m) && Math.Abs(m - 40) < 1e-9, "mils suffix w/ space");
+    Assert(EU.TryParseLength("2\"", DU.Mm, out m) && Math.Abs(m - 2000) < 1e-9, "inch mark");
+    Assert(EU.TryParseLength("1,5", DU.In, out m) && Math.Abs(m - 1500) < 1e-9, "comma decimal");
+    Assert(EU.TryParseLength("72pt", DU.In, out m) && Math.Abs(m - 1000) < 1e-9, "points");
+    Assert(EU.TryParseLength("10 dots", DU.Mils, out m, 8) && Math.Abs(m - 10 * EU.DotPitchMils(8)) < 1e-9, "dots w/ density");
+    Assert(!EU.TryParseLength("10 dots", DU.Mils, out _), "dots w/o density rejected");
+    Assert(!EU.TryParseLength("abc", DU.In, out _), "garbage rejected");
+    Assert(!EU.TryParseLength("", DU.In, out _), "empty rejected");
+
+    // round trip at display precision: what you see is what you get back
+    double mils = 25 * EU.MilsPerMm;                       // 984.2519...
+    Assert(EU.TryParseLength(EU.Format(mils, DU.Mm), DU.Mm, out m)
+           && Math.Abs(m - mils) < 1e-6, "mm round-trip");
+    // font sizes: points in, mils out
+    AssertEq("12", EU.FormatPoints(12 * EU.MilsPerPt), "12 pt");
+    AssertEq("8.6", EU.FormatPoints(120), "120 mils ≈ 8.6 pt");
+    Assert(EU.TryParsePoints("10", out m) && Math.Abs(m - 10 * EU.MilsPerPt) < 1e-9, "bare = pt");
+    Assert(EU.TryParsePoints("200 mils", out m) && Math.Abs(m - 200) < 1e-9, "mils suffix");
+    Assert(EU.TryParsePoints("3mm", out m) && Math.Abs(m - 3 * EU.MilsPerMm) < 1e-9, "mm suffix");
+    Assert(!EU.TryParsePoints("", out _), "empty font size rejected");
+    AssertEq(DU.Mm, EU.Parse("mm"), "parse mm");
+    AssertEq(DU.In, EU.Parse(null), "parse default");
+    AssertEq(10.0, EU.NudgeMils(DU.In), "in nudge = 0.01 in");
+});
+
+Check("ViewSettings: etiq:view parse/serialize round-trip, defaults omit element", () =>
+{
+    var vd = new Etiq.Editor.Core.ViewSettings();
+    Assert(vd.IsDefault, "fresh = default");
+    AssertEq(0.0, vd.GridPitchMils(), "grid off = 0 pitch");
+
+    var v = new Etiq.Editor.Core.ViewSettings
+    {
+        Units = DU.Mm, Grid = "dots", DotsPerMm = 8, Target = "ZT230",
+        ShowGrid = false, SnapGuides = false, GuidesLocked = true,
+    };
+    v.Guides.Add(new Etiq.Editor.Core.Guide(true, 250));
+    v.Guides.Add(new Etiq.Editor.Core.Guide(false, 984.251968504, "fold"));
+    var el = v.ToElement();
+    AssertEq("mm", (string?)el.Attribute("units"), "units attr");
+    AssertEq("dots", (string?)el.Attribute("grid"), "grid attr");
+    AssertEq("8", (string?)el.Attribute("dots-per-mm"), "density attr");
+    AssertEq("grid,objects", (string?)el.Attribute("snap"), "snap list");
+    AssertEq("false", (string?)el.Attribute("show-grid"), "show-grid");
+    AssertEq(2, el.Elements(Etiq.Editor.Core.EditorDoc.EtiqNs + "guide").Count(), "guides written");
+
+    var back = Etiq.Editor.Core.ViewSettings.Read(el);
+    AssertEq(DU.Mm, back.Units, "units back");
+    Assert(back.IsDotGrid && back.DotsPerMm == 8 && back.Target == "ZT230", "dots back");
+    Assert(!back.ShowGrid && back.SnapGrid && !back.SnapGuides && back.SnapObjects && back.GuidesLocked, "flags back");
+    AssertEq(2, back.Guides.Count, "guides back");
+    Assert(back.Guides[1].Name == "fold" && !back.Guides[1].Vertical && Math.Abs(back.Guides[1].Pos - 984.251968504) < 1e-9, "guide detail");
+    Assert(Math.Abs(back.GridPitchMils() - 1000 / 203.2) < 1e-9, "dot pitch from density");
+
+    var manual = new Etiq.Editor.Core.ViewSettings { Grid = "1mm" };
+    Assert(Math.Abs(manual.GridPitchMils() - EU.MilsPerMm) < 1e-9, "1mm pitch");
+    manual.Grid = "50"; AssertEq(50.0, manual.GridPitchMils(), "bare = mils");
+    manual.Grid = "dots"; AssertEq(0.0, manual.GridPitchMils(), "dots w/o density = 0");
+    manual.SnapGrid = false; manual.Grid = "50"; AssertEq(0.0, manual.SnapPitchMils(), "snap off = 0");
+});
+
+Check("EditorDoc.SetView: creates metadata, undoable, removed again at defaults, snap-all", () =>
+{
+    var doc = Etiq.Editor.Core.EditorDoc.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
+          <g data-layer="L">
+            <rect x="103" y="47" width="211" height="96"/>
+            <line x1="12" y1="12" x2="1003" y2="12" stroke="black"/>
+            <rect x="500" y="500" width="100" height="100" transform="rotate(30 550 550)"/>
+          </g>
+        </svg>
+        """);
+    Assert(doc.EtiqView() is null && doc.View.IsDefault, "no view = defaults");
+    AssertEq(0.0, doc.GridMils, "grid off");
+
+    var v = doc.View.Clone(); v.Grid = "dots"; v.DotsPerMm = 8; v.Target = "ZT230";
+    doc.SetView(v);
+    Assert(doc.EtiqView() is not null, "view element created (with metadata + label)");
+    Assert(doc.EtiqLabel() is not null, "etiq:label created");
+    Assert(Math.Abs(doc.GridMils - 1000 / 203.2) < 1e-9, "GridMils follows view");
+    Assert(doc.IsDirty, "dirty after view edit");
+    // engines ignore etiq:view: the template still validates with no errors
+    var vt = EtiqTemplate.Parse(doc.Xml.ToString());
+    Assert(!TemplateValidator.Validate(vt).Any(f => f.Severity == Severity.Error), "etiq:view is inert for the validator");
+
+    var (n, skipped) = doc.SnapAllToGrid();
+    AssertEq(2, n, "rect + line snapped");
+    AssertEq(1, skipped, "rotated rect skipped");
+    double g = doc.GridMils;
+    var r = doc.Objects.First(o => o.Kind == Etiq.Editor.Core.ObjectKind.Box && o.RotationDeg == 0);
+    double x = r.GetNum("x"), w = r.GetNum("width");
+    Assert(Math.Abs(x / g - Math.Round(x / g)) < 1e-6, "x on lattice");
+    Assert(Math.Abs(w / g - Math.Round(w / g)) < 1e-6 && w > 0, "width whole dots");
+    var ln = doc.Objects.First(o => o.Kind == Etiq.Editor.Core.ObjectKind.Line);
+    Assert(Math.Abs(ln.GetNum("x2") / g - Math.Round(ln.GetNum("x2") / g)) < 1e-6, "line endpoint on lattice");
+    doc.Undo.Undo();
+    AssertEq(103.0, r.GetNum("x"), "snap-all is one undo");
+
+    // back to defaults removes the element; undo restores it
+    doc.SetView(new Etiq.Editor.Core.ViewSettings());
+    Assert(doc.EtiqView() is null, "default view → element removed");
+    doc.Undo.Undo();
+    Assert(doc.EtiqView() is not null && doc.View.IsDotGrid, "undo restores view");
+    doc.Undo.Undo();
+    Assert(doc.EtiqView() is null && doc.EtiqLabel() is null, "undo of creation removes label again");
+});
+
+Check("guides: SnapEngine treats guide positions as magnetic candidates; SetView merges", () =>
+{
+    var moving = new Etiq.Editor.Core.RectD(97, 200, 50, 20);
+    var (dx, dy, g) = Etiq.Editor.Core.SnapEngine.Adjust(moving, new List<Etiq.Editor.Core.RectD>(), null, 6,
+        guideXs: new[] { 100.0 }, guideYs: new[] { 500.0 });
+    AssertEq(3.0, dx, "left edge pulled onto vertical guide");
+    AssertEq(0.0, dy, "horizontal guide too far → no pull");
+    Assert(g.Count == 1 && g[0].Vertical && g[0].Pos == 100, "one vertical snap line");
+    var (p, _) = Etiq.Editor.Core.SnapEngine.SnapPoint(new Etiq.Editor.Core.PointD(1, 498), new List<Etiq.Editor.Core.RectD>(), null, 6,
+        snapX: false, snapY: true, guideXs: new[] { 0.0 }, guideYs: new[] { 500.0 });
+    Assert(p.X == 1 && p.Y == 500, "axis-restricted point snap to a guide");
+
+    // merged view edits: undo of the merged pair returns to the pre-gesture state in one step
+    var doc = Etiq.Editor.Core.EditorDoc.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000"/>
+        """);
+    var v1 = doc.View.Clone(); v1.Guides.Add(new Etiq.Editor.Core.Guide(true, 100));
+    doc.SetView(v1, "guide", mergeKey: "g1");
+    var v2 = doc.View.Clone(); v2.Guides[0] = v2.Guides[0] with { Pos = 250 };
+    doc.SetView(v2, "guide", mergeKey: "g1");
+    AssertEq(250.0, doc.View.Guides[0].Pos, "second edit applied");
+    doc.Undo.Undo();
+    AssertEq(0, doc.View.Guides.Count, "one undo removes the whole merged gesture");
+    Assert(doc.EtiqView() is null && doc.EtiqLabel() is null, "structure created by the gesture is gone");
+    doc.Undo.Redo();
+    AssertEq(250.0, doc.View.Guides[0].Pos, "redo replays the chain");
+});
+
+Check("Inkscape guides import read-only when etiq:view is absent (y flipped, angled skipped)", () =>
+{
+    var doc = Etiq.Editor.Core.EditorDoc.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg"
+             xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+             xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+             width="6in" height="4in" viewBox="0 0 6000 4000">
+          <sodipodi:namedview id="nv">
+            <sodipodi:guide position="1500,0" orientation="1,0" id="g1" inkscape:label="left col"/>
+            <sodipodi:guide position="0,1000" orientation="0,1" id="g2"/>
+            <sodipodi:guide position="100,100" orientation="0.7071,0.7071" id="g3"/>
+          </sodipodi:namedview>
+          <g data-layer="L"><rect x="1" y="1" width="10" height="10"/></g>
+        </svg>
+        """);
+    Assert(doc.EtiqView() is null, "no etiq:view");
+    var v = doc.View;
+    AssertEq(2, v.Guides.Count, "two axis-aligned guides imported, angled skipped");
+    Assert(v.Guides[0].Vertical && v.Guides[0].Pos == 1500 && v.Guides[0].Name == "left col", "vertical guide + label");
+    Assert(!v.Guides[1].Vertical && v.Guides[1].Pos == 3000, "horizontal: y-up 1000 from bottom → 3000 from top");
+    // untouched: saving adds nothing; first edit writes etiq:view, namedview untouched
+    Assert(doc.Xml.ToString().Contains("sodipodi:guide") && doc.EtiqView() is null, "namedview left alone");
+    var nv = v.Clone(); nv.Guides.Add(new Etiq.Editor.Core.Guide(true, 250));
+    doc.SetView(nv, "add guide");
+    AssertEq(3, doc.View.Guides.Count, "etiq:view now authoritative");
+    Assert(doc.Xml.Root!.Element(Etiq.Editor.Core.ViewSettings.Sodipodi + "namedview")!
+        .Elements(Etiq.Editor.Core.ViewSettings.Sodipodi + "guide").Count() == 3, "namedview never written");
+});
+
+Check("Redaction: stand-in rules (literal / placeholder / mask), sensitive field set", () =>
+{
+    var ns = XNamespace.Get("http://www.w3.org/2000/svg");
+    var doc = Etiq.Editor.Core.EditorDoc.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
+          <g data-layer="L">
+            <text id="t1" x="0" y="100" data-sensitive="SAMPLE CO">Real Company Inc.</text>
+            <text id="t2" x="0" y="200" data-sensitive="true">123 Real St</text>
+            <text id="t3" x="0" y="300" data-field="Addr" data-sensitive="true">100 EXAMPLE AVE</text>
+            <text id="t4" x="0" y="400">public</text>
+          </g>
+        </svg>
+        """);
+    XElement E(string id) => doc.Xml.Descendants().First(e => (string?)e.Attribute("id") == id);
+    Assert(Etiq.Editor.Core.Redaction.IsSensitive(E("t1")) && !Etiq.Editor.Core.Redaction.IsSensitive(E("t4")), "mark detection");
+    AssertEq("SAMPLE CO", Etiq.Editor.Core.Redaction.Display(E("t1"), "Real Company Inc."), "literal stand-in");
+    AssertEq("███████████", Etiq.Editor.Core.Redaction.Display(E("t2"), "123 Real St"), "static → mask of same length");
+    AssertEq("100 EXAMPLE AVE", Etiq.Editor.Core.Redaction.Display(E("t3"), "100 EXAMPLE AVE"), "bound → placeholder");
+    var sens = Etiq.Editor.Core.Redaction.SensitiveFields(doc.Root);
+    Assert(sens.Count == 1 && sens.Contains("Addr"), "only bound sensitive fields listed");
+    var doc2 = Etiq.Editor.Core.EditorDoc.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:list name="ShipTo" key="Name"><etiq:row Name="A" Addr="1 Real St"/></etiq:list>
+            <etiq:list name="Dept" key="Name"><etiq:row Name="QA"/></etiq:list>
+            <etiq:field name="Addr" source="list" list="ShipTo" column="Addr"/>
+            <etiq:field name="Dept" source="list" list="Dept" column="Name"/>
+          </etiq:label></metadata>
+          <g data-layer="L"><text data-field="Addr" data-sensitive="true">100 EXAMPLE AVE</text><text data-field="Dept">QA</text></g>
+        </svg>
+        """);
+    var sl = Etiq.Editor.Core.Redaction.SensitiveLists(doc2.Root, Etiq.Editor.Core.Redaction.SensitiveFields(doc2.Root));
+    Assert(sl.Count == 1 && sl.Contains("ShipTo"), "list feeding a sensitive field is sensitive; unrelated list is not");
+
+    // field-level flag + resolver substitutes: a compose of sensitive and public parts redacts only the sensitive part
+    var doc3 = Etiq.Editor.Core.EditorDoc.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:field name="CoName" source="fixed" value="Real Company Inc." sensitive="true" stand-in="SAMPLE CO"/>
+            <etiq:field name="Street" source="fixed" value="1 Real St" sensitive="true"/>
+            <etiq:field name="Title" source="compose"><etiq:seg ref="CoName"/><etiq:seg value=" Container I.D."/></etiq:field>
+          </etiq:label></metadata>
+          <g data-layer="L">
+            <text data-field="Title">SAMPLE Container I.D.</text>
+            <text data-field="Street">100 EXAMPLE AVE</text>
+          </g>
+        </svg>
+        """);
+    var flagged = Etiq.Editor.Core.Redaction.AllSensitiveFields(doc3.Root);
+    Assert(flagged.SetEquals(new[] { "CoName", "Street" }), "field-level flags collected");
+    var subs = Etiq.Editor.Core.Redaction.Substitutes(doc3.Root);
+    AssertEq("SAMPLE CO", subs["CoName"], "explicit stand-in");
+    AssertEq("100 EXAMPLE AVE", subs["Street"], "no stand-in → bound element's placeholder");
+    var t3 = EtiqTemplate.Parse(doc3.Xml.ToString());
+    Assert(t3.Fields.First(f => f.Name == "CoName").Sensitive && t3.Fields.First(f => f.Name == "Title").Sensitive == false, "Field.Sensitive parses");
+    var real = new FieldResolver(t3, new ResolveContext()).ResolveAll();
+    AssertEq("Real Company Inc. Container I.D.", real["Title"], "print path: real");
+    var shown = new FieldResolver(t3, new ResolveContext { Substitutes = subs }).ResolveAll();
+    AssertEq("SAMPLE CO Container I.D.", shown["Title"], "display: only the sensitive part swapped");
+    AssertEq("100 EXAMPLE AVE", shown["Street"], "display: flagged field itself swapped");
+    Assert(!TemplateValidator.Validate(t3).Any(f => f.Severity == Severity.Error), "sensitive/stand-in attrs are inert for the validator");
+    doc.Undo.Push(Etiq.Editor.Core.Redaction.Set(E("t4"), true, null));
+    AssertEq("true", (string?)E("t4").Attribute("data-sensitive"), "set flag");
+    doc.Undo.Push(Etiq.Editor.Core.Redaction.Set(E("t4"), false, null));
+    Assert(E("t4").Attribute("data-sensitive") is null, "clear flag");
+});
+
+Check("Registry: optional dotsPerMm overrides nominal dpi for dot pitch", () =>
+{
+    string dir = Path.Combine(Path.GetTempPath(), "etiq-reg-dpmm");
+    Directory.CreateDirectory(dir);
+    File.WriteAllText(Path.Combine(dir, "printers.json"), """
+        [{"name":"Z","dpi":203,"dotsPerMm":8,"widthMils":4090,"path":"zpl"},
+         {"name":"N","dpi":203,"widthMils":4090,"path":"driver"}]
+        """);
+    var reg = Registry.Load(dir);
+    Assert(Math.Abs(reg.Printers["Z"].DotsPerMmEffective - 8) < 1e-12, "explicit density");
+    Assert(Math.Abs(reg.Printers["Z"].DotMils - 1000 / 203.2) < 1e-9, "pitch from density");
+    Assert(Math.Abs(reg.Printers["N"].DotsPerMmEffective - 203 / 25.4) < 1e-12, "derived density");
+    Assert(Math.Abs(reg.Printers["N"].DotMils - 1000.0 / 203) < 1e-9, "nominal pitch unchanged");
+});
+
+Check("label size in mm keeps fractional mils in the viewBox", () =>
+{
+    var doc = Etiq.Editor.Core.EditorDoc.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000"/>
+        """);
+    doc.SetLabelSize("50mm", "25mm", 50 * 1000 / 25.4, 25 * 1000 / 25.4);
+    AssertEq("0 0 1968.503937008 984.251968504", (string?)doc.Root.Attribute("viewBox"), "viewBox");
+    var vb = doc.ViewBox;
+    AssertEq("50.000", (vb.W * 0.0254).ToString("0.000", System.Globalization.CultureInfo.InvariantCulture), "width back to mm");
 });
 
 Check("list picker attrs: caption/display/filter parse + validate", () =>
@@ -2205,6 +2502,34 @@ Check("CredentialStore secret detection + passthrough", () =>
 });
 
 // ---------- counters ----------
+
+Check("map ignore-case: per-map and per-row", () =>
+{
+    var t = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 100 100">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:field name="In" source="prompt"/>
+            <etiq:map name="Tare" default="-">
+              <etiq:when from="FLEXIBLE" to="52" ignore-case="true"/>
+              <etiq:when from="RIGID" to="10"/>
+            </etiq:map>
+            <etiq:map name="TareAll" default="-" ignore-case="true">
+              <etiq:when prefix="FLEX" to="52"/>
+              <etiq:when from="RIGID" to="10" ignore-case="false"/>
+            </etiq:map>
+            <etiq:field name="A" source="compose"><etiq:seg ref="In" map="Tare"/></etiq:field>
+            <etiq:field name="B" source="compose"><etiq:seg ref="In" map="TareAll"/></etiq:field>
+          </etiq:label></metadata>
+        </svg>
+        """);
+    string R(string field, string v) => new FieldResolver(t,
+        new ResolveContext { PromptValues = { ["In"] = v } }).Resolve(field);
+    AssertEq("52", R("A", "Flexible"), "row ignore-case exact");
+    AssertEq("10", R("A", "RIGID"), "case-sensitive row still exact");
+    AssertEq("-", R("A", "rigid"), "case-sensitive row misses");
+    AssertEq("52", R("B", "flexible bag"), "map-level ignore-case prefix");
+    AssertEq("-", R("B", "rigid"), "row override back to sensitive");
+});
 
 Check("prompt default= parses (data-panel prefill)", () =>
 {

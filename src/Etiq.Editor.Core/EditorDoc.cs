@@ -16,7 +16,10 @@ public sealed class EditorDoc
     public XDocument Xml { get; }
     public string? Path { get; private set; }
     public UndoStack Undo { get; } = new();
-    public double GridMils { get; set; } = 0;   // 0 = snapping off
+
+    /// <summary>Hard-snap pitch in mils (0 = off): the view's grid when
+    /// snap-to-grid is on. Read by the canvas on every drag step.</summary>
+    public double GridMils => View.SnapPitchMils();
 
     private string _savedXml;   // serialized form at load/save time
 
@@ -112,6 +115,131 @@ public sealed class EditorDoc
                 edited.Remove();
                 if (createdMeta) { meta!.Remove(); meta = null; createdMeta = false; }
             });
+    }
+
+    // ---- view state (etiq:view: units, grid, dots density, guides) ----
+
+    /// <summary>The live etiq:view element, or null.</summary>
+    public XElement? EtiqView() => EtiqLabel()?.Element(EtiqNs + "view");
+
+    private ViewSettings? _view;
+    private XElement? _viewSrc;
+
+    /// <summary>Parsed view settings. Cached against the live element so
+    /// undo/redo (which swap elements) re-parse; defaults when absent.
+    /// Treat as read-only — change through <see cref="SetView"/>.</summary>
+    public ViewSettings View
+    {
+        get
+        {
+            var el = EtiqView();
+            if (_view is null || !ReferenceEquals(el, _viewSrc) || (el is not null && _viewStamp != el.ToString()))
+            {
+                // no etiq:view yet: pick up Inkscape guides (read-only) so a
+                // template drawn there arrives with its guides in place; the
+                // first guide edit here writes them into etiq:view
+                _view = el is null ? ViewSettings.FromInkscape(Root, ViewBox) : ViewSettings.Read(el);
+                _viewSrc = el;
+                _viewStamp = el?.ToString() ?? "";
+            }
+            return _view;
+        }
+    }
+    private string _viewStamp = "";
+
+    /// <summary>Install new view settings as ONE undoable step. Creates
+    /// metadata/etiq:label when the template has none; removes the element
+    /// again when everything is back at defaults so untouched templates
+    /// never grow one. Marks the document dirty like any edit. Do/undo
+    /// locate the LIVE element at execution time (never captured refs), so
+    /// consecutive view edits merge safely under a shared mergeKey.</summary>
+    public void SetView(ViewSettings v, string label = "view settings", string? mergeKey = null)
+    {
+        var oldEl = EtiqView() is { } live ? new XElement(live) : null;   // snapshot
+        var newEl = v.IsDefault ? null : v.ToElement();
+        if (oldEl is null && newEl is null) return;
+        if (oldEl is not null && newEl is not null && oldEl.ToString() == newEl.ToString()) return;
+        bool hadLabel = EtiqLabel() is not null;
+        bool hadMeta = Root.Elements().Any(e => e.Name.LocalName == "metadata");
+
+        void Install(XElement? target)
+        {
+            var cur = EtiqView();
+            if (target is null)
+            {
+                cur?.Remove();
+                // tidy structure this command created, if now empty
+                if (!hadLabel && EtiqLabel() is { } lbl && !lbl.HasElements) lbl.Remove();
+                if (!hadMeta && Root.Elements().FirstOrDefault(e => e.Name.LocalName == "metadata") is { } m && !m.HasElements)
+                    m.Remove();
+                return;
+            }
+            var copy = new XElement(target);
+            if (cur is not null) { cur.ReplaceWith(copy); return; }
+            var meta = Root.Elements().FirstOrDefault(e => e.Name.LocalName == "metadata");
+            if (meta is null) { meta = new XElement(Root.Name.Namespace + "metadata"); Root.AddFirst(meta); }
+            var labelEl = meta.Element(EtiqNs + "label");
+            if (labelEl is null)
+            {
+                labelEl = new XElement(EtiqNs + "label",
+                    new XAttribute(XNamespace.Xmlns + "etiq", EtiqNs.NamespaceName));
+                meta.Add(labelEl);
+            }
+            labelEl.Add(copy);
+        }
+
+        Undo.Push(new EditCommand(label,
+            doIt: () => Install(newEl),
+            undoIt: () => Install(oldEl),
+            mergeKey));
+        _view = null;
+    }
+
+    /// <summary>Round every UNROTATED object's position and size to the
+    /// current grid pitch (dots or manual) — one undo entry. Rotated objects
+    /// are skipped and counted; lines snap both endpoints. Returns
+    /// (snapped, skippedRotated).</summary>
+    public (int Snapped, int Skipped) SnapAllToGrid(ITextMeasurer? measurer = null)
+    {
+        double g = View.GridPitchMils();
+        if (g <= 0) return (0, 0);
+        var cmds = new List<EditCommand>();
+        int skipped = 0, snapped = 0;
+        foreach (var o in Objects)
+        {
+            if (o.RotationDeg != 0) { skipped++; continue; }
+            if (o.Kind == ObjectKind.Line)
+            {
+                var p1 = new PointD(o.GetNum("x1"), o.GetNum("y1"));
+                var p2 = new PointD(o.GetNum("x2"), o.GetNum("y2"));
+                var a = Geometry.Snap(p1, g);
+                var b = Geometry.Snap(p2, g);
+                if (a != p1) cmds.Add(o.SetLineEndpoint(1, a));
+                if (b != p2) cmds.Add(o.SetLineEndpoint(2, b));
+                if (a != p1 || b != p2) snapped++;
+                continue;
+            }
+            var r = o.Bounds(measurer);
+            double x1 = Geometry.Snap(r.X, g), y1 = Geometry.Snap(r.Y, g);
+            double x2 = Geometry.Snap(r.Right, g), y2 = Geometry.Snap(r.Bottom, g);
+            if (x2 - x1 < g) x2 = x1 + g;
+            if (y2 - y1 < g) y2 = y1 + g;
+            var nr = new RectD(x1, y1, x2 - x1, y2 - y1);
+            if (Math.Abs(nr.X - r.X) < 1e-6 && Math.Abs(nr.Y - r.Y) < 1e-6 &&
+                Math.Abs(nr.W - r.W) < 1e-6 && Math.Abs(nr.H - r.H) < 1e-6) continue;
+            if (o.Kind == ObjectKind.Text)
+            {
+                // text: position only — its size follows the font; forcing
+                // the box would silently change font-size/data-width
+                if (Math.Abs(nr.X - r.X) < 1e-6 && Math.Abs(nr.Y - r.Y) < 1e-6) continue;
+                cmds.Add(o.Move(nr.X - r.X, nr.Y - r.Y));
+            }
+            else cmds.Add(o.Resize(nr, measurer));
+            snapped++;
+        }
+        if (cmds.Count > 0)
+            Undo.Push(EditCommand.Combine(cmds, $"snap {snapped} objects to grid"));
+        return (snapped, skipped);
     }
 
     // ---- layers ----
@@ -220,13 +348,13 @@ public sealed class EditorDoc
     /// the viewBox extent. Content stays where it is in user units; the
     /// origin is kept — objects beyond the new edge simply hang off the
     /// label until moved.</summary>
-    public void SetLabelSize(string widthAttr, string heightAttr, int wMils, int hMils)
+    public void SetLabelSize(string widthAttr, string heightAttr, double wMils, double hMils)
     {
         var vb = ViewBox;
         string? oldW = (string?)Root.Attribute("width"), oldH = (string?)Root.Attribute("height");
         string? oldVb = (string?)Root.Attribute("viewBox");
-        string inv(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
-        string newVb = $"{inv(vb.X)} {inv(vb.Y)} {wMils} {hMils}";
+        string inv(double v) => Num.F(v);
+        string newVb = $"{inv(vb.X)} {inv(vb.Y)} {inv(wMils)} {inv(hMils)}";
         Undo.Push(new EditCommand($"label size {widthAttr} x {heightAttr}",
             doIt: () =>
             {
@@ -280,7 +408,7 @@ public sealed class EditorDoc
             }
             else
             {
-                string n(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+                string n(double v) => Num.F(v);
                 cmds.Add(EditCommand.SetAttr(o.El, "transform",
                     $"rotate({n(deg)} {n(q.X)} {n(q.Y)})", "rotate"));
             }

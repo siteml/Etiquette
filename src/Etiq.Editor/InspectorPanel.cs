@@ -286,17 +286,18 @@ public sealed class InspectorPanel : UserControl
         // position (lines edit their endpoints instead)
         if (o.Kind == ObjectKind.Line)
         {
-            AddNum("X1", () => O.GetNum("x1"), v => SetAttr(O, "x1", N(v), "set X1"));
-            AddNum("Y1", () => O.GetNum("y1"), v => SetAttr(O, "y1", N(v), "set Y1"));
-            AddNum("X2", () => O.GetNum("x2"), v => SetAttr(O, "x2", N(v), "set X2"));
-            AddNum("Y2", () => O.GetNum("y2"), v => SetAttr(O, "y2", N(v), "set Y2"));
-            AddNum("Stroke", () => O.GetNum("stroke-width", 1),
+            AddLen("X1", () => O.GetNum("x1"), v => SetAttr(O, "x1", N(v), "set X1"));
+            AddLen("Y1", () => O.GetNum("y1"), v => SetAttr(O, "y1", N(v), "set Y1"));
+            AddLen("X2", () => O.GetNum("x2"), v => SetAttr(O, "x2", N(v), "set X2"));
+            AddLen("Y2", () => O.GetNum("y2"), v => SetAttr(O, "y2", N(v), "set Y2"));
+            AddLen("Stroke", () => O.GetNum("stroke-width", 1),
                 v => SetAttr(O, "stroke-width", v <= 0 ? null : N(v), "set stroke"));
+            AddStrokeDots();
             return;
         }
 
-        AddNum("X", () => O.GetNum("x"), v => SetAttr(O, "x", N(v), "set X"));
-        AddNum("Y", () => O.GetNum("y"), v => SetAttr(O, "y", N(v), "set Y"));
+        AddLen("X", () => O.GetNum("x"), v => SetAttr(O, "x", N(v), "set X"));
+        AddLen("Y", () => O.GetNum("y"), v => SetAttr(O, "y", N(v), "set Y"));
         AddNum("Rotation", () => O.RotationDeg, v => Push(O.SetRotation(v)), step: 15);
 
         switch (o.Kind)
@@ -304,16 +305,17 @@ public sealed class InspectorPanel : UserControl
             case ObjectKind.Text: BuildText(); break;
             case ObjectKind.Barcode: BuildBarcode(o); break;
             case ObjectKind.Box:
-                AddNum("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
-                AddNum("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
+                AddLen("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
+                AddLen("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
                 AddCheck("Filled", () => ((string?)O.El.Attribute("fill") ?? "none") != "none",
                     v => SetAttr(O, "fill", v ? "black" : null, "set fill"));
-                AddNum("Stroke", () => O.GetNum("stroke-width", 1),
+                AddLen("Stroke", () => O.GetNum("stroke-width", 1),
                     v => SetAttr(O, "stroke-width", v <= 0 ? null : N(v), "set stroke"));
+                AddStrokeDots();
                 break;
             case ObjectKind.Image:
-                AddNum("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
-                AddNum("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
+                AddLen("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
+                AddLen("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
                 break;
         }
     }
@@ -322,19 +324,21 @@ public sealed class InspectorPanel : UserControl
     {
         AddHeader("Text");
         // multiline content edits through the shared prompt (Enter = new line)
-        AddButtonRow("Text", () => Snip(O.El.Value), "Edit…", () =>
+        AddButtonRow("Text", () => Snip(UnitPrefs.Redact && Redaction.IsSensitive(O.El)
+                                          ? Redaction.Display(O.El, O.El.Value) : O.El.Value), "Edit…", () =>
         {
             string? t = Prompts.PromptText(FindForm()!, "Edit text (Enter = new line)",
                 O.El.Value, multiline: true);
             if (t is not null) Push(O.SetText(t));
         });
+        AddSensitive();
         AddCombo("Font", InstalledFonts(), () => O.FontFamily,
             v => SetAttr(O, "font-family", v == "" ? null : v, "set font"), editable: true);
-        AddNum("Font size", () => O.GetNum("font-size", 12),
+        AddPt("Font size", () => O.GetNum("font-size", 12),
             v => SetAttr(O, "font-size", N(Math.Max(1, v)), "set font size"));
         AddCheck("Bold", () => O.Bold,
             v => SetAttr(O, "font-weight", v ? "bold" : null, "set bold"));
-        AddNum("Line height", () => O.GetNum("data-line-height"),
+        AddLen("Line height", () => O.GetNum("data-line-height"),
             v => SetAttr(O, "data-line-height", v <= 0 ? null : N(v), "set line height"),
             allowEmpty: true, hint: "baseline-to-baseline; empty = 1.2 × font size");
 
@@ -346,10 +350,10 @@ public sealed class InspectorPanel : UserControl
             () => (string?)O.El.Attribute("data-fit") ?? "auto",
             v => SetAttr(O, "data-fit", v == "auto" ? null : v, "set fit mode"),
             hint: "auto = inferred: width if a box width is set, else none");
-        AddNum("Width", () => O.GetNum("data-width"),
+        AddLen("Width", () => O.GetNum("data-width"),
             v => SetAttr(O, "data-width", v <= 0 ? null : N(v), "set width"),
             allowEmpty: true, hint: "empty = natural width");
-        AddNum("Height", () => O.GetNum("data-height"),
+        AddLen("Height", () => O.GetNum("data-height"),
             v => SetAttr(O, "data-height", v <= 0 ? null : N(v), "set height"),
             allowEmpty: true, hint: "empty = natural height");
         AddCombo("Align", new[] { "default", "left", "center", "right" },
@@ -377,9 +381,10 @@ public sealed class InspectorPanel : UserControl
     private void BuildBarcode(EditorObject o)
     {
         string sym = (string?)o.El.Attribute("data-barcode") ?? "";
-        AddNum("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
-        AddNum("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
+        AddLen("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
+        AddLen("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
 
+        AddSensitive();
         AddHeader("Barcode");
         AddCombo("Symbology", Etiq.Core.EtiqTemplate.Symbologies,
             () => (string?)O.El.Attribute("data-barcode") ?? "",
@@ -648,8 +653,8 @@ public sealed class InspectorPanel : UserControl
     private void BuildMulti()
     {
         AddHeader(() => $"{_objs.Count} objects selected");
-        AddNum("X", () => SelBounds().X, v => _doc!.MoveObjects(_objs, v - SelBounds().X, 0));
-        AddNum("Y", () => SelBounds().Y, v => _doc!.MoveObjects(_objs, 0, v - SelBounds().Y));
+        AddLen("X", () => SelBounds().X, v => _doc!.MoveObjects(_objs, v - SelBounds().X, 0));
+        AddLen("Y", () => SelBounds().Y, v => _doc!.MoveObjects(_objs, 0, v - SelBounds().Y));
         AddNum("Rotate by", () => 0, v =>
         {
             if (v % 360 != 0) _doc!.RotateObjects(_objs, v, SelBounds().Center);
@@ -657,7 +662,7 @@ public sealed class InspectorPanel : UserControl
 
         if (Texts().Count == 0) return;      // has-text is part of the shape key
         AddHeader(() => $"Text ({Texts().Count})");
-        AddNum("Font size", () =>
+        AddPt("Font size", () =>
         {
             var sizes = Texts().Select(t => t.GetNum("font-size", 12)).Distinct().ToList();
             return sizes.Count == 1 ? sizes[0] : 0;
@@ -671,8 +676,7 @@ public sealed class InspectorPanel : UserControl
 
     // ---------- edit plumbing (all through the undo stack) ----------
 
-    private static string N(double v) =>
-        v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+    private static string N(double v) => Num.F(v);
 
     private void Push(EditCommand cmd)
     {
@@ -823,14 +827,18 @@ public sealed class InspectorPanel : UserControl
     /// commits the sentinel (which the setter maps to attribute removal).</summary>
     private void AddNum(string label, Func<double> get, Action<double> set,
                         double step = 1, bool allowEmpty = false, double unset = 0,
-                        string? hint = null)
+                        string? hint = null,
+                        Func<double, string>? fmt = null, Func<string, double?>? parse = null)
     {
         AddLabelCell(label);
         var tb = new TextBox { Dock = DockStyle.Fill };
+        fmt ??= N;
+        parse ??= t => double.TryParse(t, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out double d) ? d : null;
         void Load()
         {
             double v = get();
-            tb.Text = allowEmpty && v == unset ? "" : N(v);
+            tb.Text = allowEmpty && v == unset ? "" : fmt(v);
         }
         void Commit()
         {
@@ -840,9 +848,7 @@ public sealed class InspectorPanel : UserControl
             {
                 if (get() != unset) set(unset);
             }
-            else if (double.TryParse(t, System.Globalization.NumberStyles.Float,
-                         System.Globalization.CultureInfo.InvariantCulture, out double v)
-                     && Math.Abs(v - get()) > 0.0005)
+            else if (parse(t) is double v && Math.Abs(v - get()) > 0.0005)
             {
                 set(v);
             }
@@ -859,8 +865,7 @@ public sealed class InspectorPanel : UserControl
             else if (e.KeyCode is Keys.Up or Keys.Down)
             {
                 double d = (e.KeyCode == Keys.Up ? 1 : -1) * step * (e.Shift ? 10 : 1);
-                double cur = double.TryParse(tb.Text, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out double c) ? c : get();
+                double cur = parse(tb.Text) ?? get();
                 set(cur + d);
                 _loading = true;
                 Load();
@@ -870,6 +875,80 @@ public sealed class InspectorPanel : UserControl
         };
         _refreshers.Add(() => { if (!tb.Focused) Load(); });
         FinishRow(tb, hint);
+    }
+
+    /// <summary>A LENGTH row: the model value is mils, the box shows and
+    /// accepts the current display unit (label carries the suffix; a typed
+    /// suffix — "12mm", "0.5in", "40mils" — overrides). Nudge = one display
+    /// tick (0.01 in / 0.1 mm / 1 mil). The unit is part of the row
+    /// structure, so a unit change clears the cache (see UnitsChanged).</summary>
+    private void AddLen(string label, Func<double> get, Action<double> set,
+                        bool allowEmpty = false, double unset = 0, string? hint = null)
+    {
+        AddNum($"{label} ({UnitPrefs.Suffix})", get, set,
+            step: UnitPrefs.NudgeMils, allowEmpty: allowEmpty, unset: unset, hint: hint,
+            fmt: UnitPrefs.F,
+            parse: t => UnitPrefs.TryParse(t, out double m) ? m : null);
+    }
+
+    /// <summary>A FONT SIZE row: model value mils, shown in points (1 pt =
+    /// 13.889 mils) regardless of the display unit; a typed suffix (mils,
+    /// mm, in) still works. Nudge 1 pt, Shift = 10 pt.</summary>
+    private void AddPt(string label, Func<double> get, Action<double> set,
+                       bool allowEmpty = false, string? hint = null)
+    {
+        AddNum($"{label} (pt)", get, set,
+            step: Units.MilsPerPt, allowEmpty: allowEmpty, hint: hint,
+            fmt: Units.FormatPoints,
+            parse: t => Units.TryParsePoints(t, out double m) ? m : null);
+    }
+
+    /// <summary>Screen redaction mark (docs/convention.md `data-sensitive`):
+    /// checkbox + optional stand-in text. Field-bound elements fall back to
+    /// their placeholder, static text to a block mask when no stand-in is
+    /// given. Print is never affected.</summary>
+    private void AddSensitive()
+    {
+        AddCheck("Sensitive", () => Redaction.IsSensitive(O.El),
+            v => Push(Redaction.Set(O.El, v, (string?)O.El.Attribute(Redaction.Attr))),
+            hint: "View → Redact Sensitive shows a stand-in on screen; printing is unaffected");
+        AddText("Stand-in", () =>
+        {
+            string a = (string?)O.El.Attribute(Redaction.Attr) ?? "";
+            return a is "true" or "1" ? "" : a;
+        }, v => Push(Redaction.Set(O.El, true, v)),
+            hint: "empty = placeholder text (field) or a block mask (static)");
+    }
+
+    /// <summary>Stroke width in printer dots with an explicit "snap to whole
+    /// dots" button — shown only when the template knows its head density.
+    /// Explicit, never automatic: imported art carries its own widths. A
+    /// 1-dot hairline is the usual target; sub-dot strokes render
+    /// inconsistently on thermal heads.</summary>
+    private void AddStrokeDots()
+    {
+        double dpmm = UnitPrefs.DotsPerMm;
+        if (dpmm <= 0) return;
+        double pitch = Units.DotPitchMils(dpmm);
+        AddButtonRow("Stroke dots", () =>
+        {
+            double d = O.GetNum("stroke-width", 1) / pitch;
+            bool whole = Math.Abs(d - Math.Round(d)) < 0.01;
+            return whole ? $"{Math.Round(d)} dot{(Math.Round(d) == 1 ? "" : "s")}" : $"{d:0.##} dots — not whole";
+        }, "Snap", () =>
+        {
+            double dots = Math.Max(1, Math.Round(O.GetNum("stroke-width", 1) / pitch));
+            SetAttr(O, "stroke-width", N(dots * pitch), "snap stroke to dots");
+        });
+    }
+
+    /// <summary>Display unit changed: every cached row set has the old
+    /// suffix baked into its labels, so drop them all and rebuild.</summary>
+    public void UnitsChanged()
+    {
+        ClearCache();
+        _shape = "";
+        if (_doc is not null) Reshape();
     }
 
     private void AddCombo(string label, string[] items, Func<string> get, Action<string> set,

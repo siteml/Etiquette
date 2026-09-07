@@ -37,6 +37,17 @@ At print time the engine replaces the element's text content with the value
 of `PartNo`. The literal content in the file is just the design-time preview.
 
 Optional:
+- `data-sensitive="true"` or `data-sensitive="STAND-IN TEXT"` — editor-only
+  screen redaction (remote demos) for a STATIC element: while the
+  designer's Redact Sensitive mode is on, the element shows its stand-in —
+  the literal if given, else a block mask — on the canvas, in the outline
+  and in the inspector. For data, flag the FIELD instead:
+  `<etiq:field … sensitive="true" stand-in="SAMPLE CO"/>` — the field then
+  resolves to its stand-in (else the bound element's placeholder text)
+  everywhere the editor shows it, *including inside compose fields that
+  reference it*, so `{CoName} + " Container I.D."` redacts only the name;
+  pick lists feeding it show anonymous rows. Engines and print paths
+  ignore all of it: what prints is always the real content.
 - `data-format="date:dd-MMM-yyyy"` / `"number:0000"` — display formatting
 - `data-transform="upper|trim"` — simple transforms, comma-separated
 
@@ -652,6 +663,47 @@ so interop is inherent, not emulated.
 - Editors MAY additionally mirror `inkscape:groupmode="layer"` +
   `inkscape:label` (namespaces declared on the root) so Inkscape shows
   the same layers natively; engines ignore those attributes entirely.
+
+## Editor view state (etiq:view)
+
+Optional, one per template, inside `etiq:label`: how the *designer* shows
+this template — display units, grid, target head density, snapping and
+guides. **Engines, `etiq validate`, `etiq resolve` and every print path
+ignore it entirely.** It never affects output. Editors write it only once
+the operator changes a view setting; a template with nothing to say has no
+`etiq:view` at all. Full design: `docs/grid-guides.md`.
+
+```xml
+<etiq:view units="mm" grid="dots" dots-per-mm="8" target="ZT230"
+           show-grid="true" snap="grid,objects" guides-locked="false">
+  <etiq:guide axis="x" pos="250"/>
+  <etiq:guide axis="y" pos="984.251968504" name="fold"/>
+</etiq:view>
+```
+
+- `units` — `in | mm | mils | dots`. Display only; absent = the editor's
+  own default. Coordinates in the file are always user units (mils in
+  editor-authored templates).
+- `grid` — `off` (default) | a length (`50`, `0.05in`, `1mm`; a bare number
+  is mils) | `dots` (pitch = one printer dot, from `dots-per-mm`).
+- `dots-per-mm` — the target head's density, **authoritative**: 8 for a
+  nominal "203 dpi" Zebra/Toshiba head (203.2 dpi), 11.81 for 300,
+  23.62 for 600. Pitch in mils = `1000 / (25.4 × dots-per-mm)`. Required
+  for `grid="dots"` / `units="dots"`.
+- `target` — optional human label for where `dots-per-mm` came from.
+  Never resolved by name: queue and registry names drift per machine.
+- `show-grid` — draw the grid (default true; snapping is separate).
+- `snap` — comma list from `grid`, `guides`, `objects`; `none` for none.
+  Absent = all three on.
+- `guides-locked` — guides cannot be dragged or deleted until unlocked.
+- `etiq:guide` — `axis="x"` is a vertical line at `pos`, `axis="y"` a
+  horizontal one; `pos` is **always mils** regardless of `units`. Optional
+  `name`. Guides are view state, not objects: infinite, never printed, no
+  z-order, no layer membership — the `data-layer="Guides" data-print="false"`
+  idiom above is drawn helper *art* and remains unrelated.
+
+Validators MAY warn on a malformed `etiq:view` but never fail a template
+for it.
 
 ## Serialization
 

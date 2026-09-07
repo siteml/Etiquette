@@ -29,6 +29,26 @@ public sealed class MetadataDialog : Form
     // fields tab
     private readonly ListBox _fieldList = new() { Dock = DockStyle.Fill };
     private readonly FieldPane _fieldPane = new() { Dock = DockStyle.Fill };
+    private bool _relabeling;   // an in-place relabel is running: selection handlers must ignore it
+
+    /// <summary>Re-render the selected entry's caption without disturbing
+    /// the selection. ListBox implements Items[i] = x as remove + re-insert,
+    /// which fires SelectedIndexChanged (null, then the item) — every tab's
+    /// selection handler checks <see cref="_relabeling"/> and stands down.</summary>
+    private void RelabelSelected(ListBox lb)
+    {
+        int i = lb.SelectedIndex;
+        if (i < 0) return;
+        _relabeling = true;
+        try
+        {
+            lb.BeginUpdate();
+            lb.Items[i] = lb.Items[i];
+            lb.SelectedIndex = i;
+            lb.EndUpdate();
+        }
+        finally { _relabeling = false; }
+    }
     private readonly Button _editCompose = new()
         { Text = "Edit Compose…", Width = 120, Enabled = false, Anchor = AnchorStyles.Left };
     private readonly Label _composeSummary = new()
@@ -41,6 +61,7 @@ public sealed class MetadataDialog : Form
     private readonly TextBox _mapName = new() { Width = 180 };
     private readonly TextBox _mapDefault = new() { Width = 380 };
     private readonly CheckBox _mapBlank = new() { Text = "blank", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly CheckBox _mapIgnoreCase = new() { Text = "ignore case", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly DataGridView _whenGrid = GridTools.NewGrid();
 
     // lists tab
@@ -236,13 +257,16 @@ public sealed class MetadataDialog : Form
             ("Remove", (Action)(() => RemoveSelected(_fieldList, () => RefreshFieldList())))));
         _fieldList.SelectedIndexChanged += (_, _) =>
         {
+            if (_relabeling) return;   // an in-place relabel, not the operator picking a field
             _curField = _fieldList.SelectedItem as XElement;
             _fieldPane.SetField(_curField, FieldChoices, () =>
             {
-                // reformat in place — a full list rebuild would reselect and
-                // tear the pane down under the operator's caret
-                int i = _fieldList.SelectedIndex;
-                if (i >= 0) _fieldList.Items[i] = _fieldList.Items[i];
+                // reformat the list entry in place. ListBox implements
+                // Items[i] = x as delete + re-insert, which fires
+                // SelectedIndexChanged (null, then the item) — unguarded,
+                // that tore the pane down and rebuilt it on EVERY keystroke
+                // in the Name box. The flag makes the handler ignore it.
+                RelabelSelected(_fieldList);
                 UpdateComposeUi();
             });
             UpdateComposeUi();
@@ -374,6 +398,13 @@ public sealed class MetadataDialog : Form
         _whenGrid.Columns.Add(NewComboCol("Kind", "exact (from)", "prefix"));
         _whenGrid.Columns.Add("Match", "Match");
         _whenGrid.Columns.Add("To", "To");
+        var icCol = new DataGridViewCheckBoxColumn
+        {
+            Name = "IgnoreCase", HeaderText = "aA ok", FillWeight = 30,
+            ThreeState = true,   // indeterminate = inherit the map's setting
+            ToolTipText = "Match ignoring case — filled = follow the map's \"ignore case\"; checked/unchecked = this row's own setting",
+        };
+        _whenGrid.Columns.Add(icCol);
 
         var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3 };
         right.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
@@ -387,7 +418,10 @@ public sealed class MetadataDialog : Form
         _mapDefault.Width = 260; _mapDefault.Margin = new Padding(2, 4, 4, 2);
         var mapDflWrap = new FlowLayoutPanel { WrapContents = false, Dock = DockStyle.Fill, Margin = new Padding(0) };
         mapDflWrap.Controls.Add(_mapDefault); mapDflWrap.Controls.Add(_mapBlank);
+        mapDflWrap.Controls.Add(_mapIgnoreCase);
         _mapBlank.Margin = new Padding(6, 8, 0, 0);
+        _mapIgnoreCase.Margin = new Padding(12, 8, 0, 0);
+        new ToolTip().SetToolTip(_mapIgnoreCase, "All rows match ignoring case (a row's own checkbox overrides)");
         _mapBlank.CheckedChanged += (_, _) => _mapDefault.Enabled = !_mapBlank.Checked;
         new ToolTip().SetToolTip(_mapDefault,
             "Result when no row matches. Empty = NO default (unmatched blocks the print); tick blank to fall back to empty.");
@@ -400,7 +434,15 @@ public sealed class MetadataDialog : Form
         page.Controls.Add(SplitPage(_mapList, right,
             ("Add", (Action)AddMap),
             ("Remove", (Action)(() => { RemoveSelected(_mapList, RefreshMapList); LoadMap(); }))));
-        _mapList.SelectedIndexChanged += (_, _) => { CommitMap(); LoadMap(); };
+        _mapList.SelectedIndexChanged += (_, _) => { if (_relabeling) return; CommitMap(); LoadMap(); };
+        // live relabel while typing the name (the attribute itself is
+        // committed on leave as before; this only keeps the list honest)
+        _mapName.TextChanged += (_, _) =>
+        {
+            if (_curMap is null || _mapName.Text.Trim() is not { Length: > 0 } nm) return;
+            _curMap.SetAttributeValue("name", nm);
+            RelabelSelected(_mapList);
+        };
         _mapList.Format += (_, e) =>
         {
             if (e.ListItem is XElement el) e.Value = (string?)el.Attribute("name") ?? "(unnamed)";
@@ -440,13 +482,21 @@ public sealed class MetadataDialog : Form
         _mapBlank.Checked = mapDflt == "";
         _mapDefault.Text = mapDflt is null or "" ? "" : mapDflt;
         _mapDefault.Enabled = !_mapBlank.Checked;
+        _mapIgnoreCase.Checked = (string?)_curMap?.Attribute("ignore-case") == "true";
         if (_curMap is null) return;
         foreach (var w in _curMap.Elements(NS + "when"))
         {
             bool prefix = w.Attribute("prefix") is not null;
+            // tri-state: no attr = inherit the map (Indeterminate)
+            object ic = (string?)w.Attribute("ignore-case") switch
+            {
+                "true" => CheckState.Checked,
+                "false" => CheckState.Unchecked,
+                _ => CheckState.Indeterminate,
+            };
             _whenGrid.Rows.Add(prefix ? "prefix" : "exact (from)",
                 (string?)(prefix ? w.Attribute("prefix") : w.Attribute("from")) ?? "",
-                (string?)w.Attribute("to") ?? "");
+                (string?)w.Attribute("to") ?? "", ic);
         }
     }
 
@@ -457,6 +507,8 @@ public sealed class MetadataDialog : Form
         if (_mapName.Text.Trim() is { Length: > 0 } nm) _curMap.SetAttributeValue("name", nm);
         _curMap.SetAttributeValue("default",
             _mapBlank.Checked ? "" : _mapDefault.Text == "" ? null : _mapDefault.Text);
+        bool mapIc2 = _mapIgnoreCase.Checked;
+        _curMap.SetAttributeValue("ignore-case", mapIc2 ? "true" : null);
         _curMap.Elements(NS + "when").Remove();
         foreach (DataGridViewRow row in _whenGrid.Rows)
         {
@@ -465,9 +517,17 @@ public sealed class MetadataDialog : Form
             string to = row.Cells["To"].Value?.ToString() ?? "";
             if (match == "" && to == "") continue;
             bool prefix = row.Cells["Kind"].Value?.ToString() == "prefix";
-            _curMap.Add(new XElement(NS + "when",
+            var el = new XElement(NS + "when",
                 new XAttribute(prefix ? "prefix" : "from", match),
-                new XAttribute("to", to)));
+                new XAttribute("to", to));
+            // Indeterminate (or blank on a fresh row) = inherit = no attr
+            el.SetAttributeValue("ignore-case", row.Cells["IgnoreCase"].Value switch
+            {
+                CheckState.Checked or true => "true",
+                CheckState.Unchecked or false => "false",
+                _ => null,
+            });
+            _curMap.Add(el);
         }
     }
 
@@ -553,7 +613,13 @@ public sealed class MetadataDialog : Form
         page.Controls.Add(SplitPage(_listList, right,
             ("Add", (Action)AddList),
             ("Remove", (Action)(() => { RemoveSelected(_listList, RefreshListList); LoadList(); }))));
-        _listList.SelectedIndexChanged += (_, _) => { CommitList(); LoadList(); };
+        _listList.SelectedIndexChanged += (_, _) => { if (_relabeling) return; CommitList(); LoadList(); };
+        _listName.TextChanged += (_, _) =>
+        {
+            if (_curList is null || _listName.Text.Trim() is not { Length: > 0 } nm) return;
+            _curList.SetAttributeValue("name", nm);
+            RelabelSelected(_listList);
+        };
         _listList.Format += (_, e) =>
         {
             if (e.ListItem is XElement el) e.Value = (string?)el.Attribute("name") ?? "(unnamed)";
@@ -749,7 +815,13 @@ public sealed class MetadataDialog : Form
         page.Controls.Add(SplitPage(_srcList, right,
             ("Add", (Action)AddSource),
             ("Remove", (Action)(() => { RemoveSelected(_srcList, RefreshSourceList); LoadSource(); }))));
-        _srcList.SelectedIndexChanged += (_, _) => { CommitSource(); LoadSource(); };
+        _srcList.SelectedIndexChanged += (_, _) => { if (_relabeling) return; CommitSource(); LoadSource(); };
+        _srcName.TextChanged += (_, _) =>
+        {
+            if (_curSrc is null || _srcName.Text.Trim() is not { Length: > 0 } nm) return;
+            _curSrc.SetAttributeValue("name", nm);
+            RelabelSelected(_srcList);
+        };
         _srcList.Format += (_, e) =>
         {
             if (e.ListItem is XElement el)

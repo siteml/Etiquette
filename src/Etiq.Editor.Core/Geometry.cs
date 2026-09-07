@@ -1,5 +1,18 @@
 namespace Etiq.Editor.Core;
 
+/// <summary>Number formatting for attribute values written into the SVG.
+/// Coordinates are mils stored as doubles; 9 decimals (0.025 nm) keeps
+/// metric-authored values (1 mm = 5000/127 mils, a non-terminating
+/// decimal) and printer dot pitches (1000/203.2) round-trip-exact at any
+/// display precision, while still trimming float noise such as
+/// 1249.9999999999998 after grid arithmetic. Always invariant culture.</summary>
+public static class Num
+{
+    public const string Format = "0.#########";
+    public static string F(double v) =>
+        v.ToString(Format, System.Globalization.CultureInfo.InvariantCulture);
+}
+
 /// <summary>Dependency-free 2D primitives for the editor (user units).</summary>
 public readonly record struct PointD(double X, double Y)
 {

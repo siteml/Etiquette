@@ -65,6 +65,11 @@ public sealed class FieldPane : UserControl
             "Value used when the source resolves empty"),
         new("collapse-blank-lines", "Collapse blank lines", Kind.Check, new[] { "compose" },
             "Drop lines that end up empty (address-block style)"),
+
+        new("sensitive", "Sensitive", Kind.Check, null,
+            "View → Redact Sensitive shows the stand-in on screen (also inside composes); printing unaffected"),
+        new("stand-in",  "Stand-in",  Kind.Text,  null,
+            "Shown while redacting; empty = the bound element's placeholder text"),
     };
 
     // check attrs whose "true" isn't the literal "true"

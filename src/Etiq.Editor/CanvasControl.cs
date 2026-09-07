@@ -23,11 +23,18 @@ public sealed class CanvasControl : Control
 {
     private EditorDoc? _doc;
     private readonly GdiTextMeasurer _measurer = new();
+    /// <summary>The text measurer the canvas draws with (shared so bounds agree).</summary>
+    public ITextMeasurer Measurer => _measurer;
 
     public EditorMode Mode { get; set; } = EditorMode.Design;
     public double Zoom { get; private set; } = 0.15;
     public PointF Pan { get; private set; } = new(20, 20);
     public IReadOnlyDictionary<string, string>? ResolvedValues { get; set; }
+    /// <summary>Redacted twin of ResolvedValues for DRAWING while View →
+    /// Redact Sensitive is on (sensitive fields resolved to stand-ins, so
+    /// composes show only their public parts). Print always uses
+    /// ResolvedValues; this never leaves the canvas.</summary>
+    public IReadOnlyDictionary<string, string>? DisplayValues { get; set; }
 
     private readonly List<EditorObject> _sel = new();
     public IReadOnlyList<EditorObject> Selection => _sel;
@@ -55,6 +62,18 @@ public sealed class CanvasControl : Control
     private int _gesture;                       // undo merge-key generation
     private PointD _marqueeEndW;
     private List<SnapGuide> _guides = new();
+
+    // rulers + operator guides (docs/grid-guides.md pass 3)
+    public const int RulerPx = 22;
+    private Point _lastMouse = new(-1, -1);
+    private bool _guideDrag;            // dragging a guide (existing or new)
+    private int _guideIdx = -1;         // index into View.Guides; -1 = new
+    private bool _guideVertical;
+    private double _guideDragPos;       // provisional position, mils
+    private bool _guideOverRuler;       // release here = delete / cancel
+    private bool _guideArmed;           // mouse-down on a guide, not yet moved
+    private bool RulersOn => Mode == EditorMode.Design && UnitPrefs.ShowRulers;
+    private bool GuidesOn => Mode == EditorMode.Design && UnitPrefs.ShowGuides;
 
     public CanvasControl()
     {
@@ -87,8 +106,9 @@ public sealed class CanvasControl : Control
         if (_doc is null || Width < 40 || Height < 40) return;
         var vb = _doc.ViewBox;
         if (vb.W <= 0 || vb.H <= 0) return;
-        Zoom = Math.Min((Width - 40.0) / vb.W, (Height - 40.0) / vb.H);
-        Pan = new((float)((Width - vb.W * Zoom) / 2), (float)((Height - vb.H * Zoom) / 2));
+        int rp = RulersOn ? RulerPx : 0;
+        Zoom = Math.Min((Width - rp - 40.0) / vb.W, (Height - rp - 40.0) / vb.H);
+        Pan = new((float)(rp + (Width - rp - vb.W * Zoom) / 2), (float)(rp + (Height - rp - vb.H * Zoom) / 2));
         Invalidate();
     }
 
@@ -135,11 +155,106 @@ public sealed class CanvasControl : Control
 
     /// <summary>Rotation-aware snap candidates: every visible unselected
     /// object's world bounds.</summary>
-    private List<RectD> OthersWorldBounds() => _doc!.Objects
-        .Where(o => !InSelection(o) && o.Layer?.Visible != false)
+    private List<RectD> OthersWorldBounds(bool includeSelected = false) => _doc!.Objects
+        .Where(o => (includeSelected || !InSelection(o)) && o.Layer?.Visible != false)
         .Select(o => o.WorldBounds(_measurer)).ToList();
 
     // ---------- painting ----------
+
+    /// <summary>The view grid: light lines at the pitch, adaptive so the
+    /// screen spacing stays ≥ UnitPrefs.GridMinPx (every 2nd/4th/8th… line
+    /// at low zoom; snapping still uses the true pitch). Every 10th pitch (8th for a dot
+    /// grid) is drawn darker. Dot grids are anchored at the viewBox origin,
+    /// same as the ZPL raster.</summary>
+    private void DrawGrid(Graphics g, RectD vb)
+    {
+        var view = _doc!.View;
+        if (!view.ShowGrid) return;
+        double pitch = view.GridPitchMils();
+        if (pitch <= 0) return;
+
+        int major = UnitPrefs.GridMajorFor(view.IsDotGrid);
+        double minPx = UnitPrefs.GridMinPx;
+
+        int every, majorEvery;                     // both in pitches; every == 0 → no minors
+        if (UnitPrefs.GridMajorAdaptive)
+        {
+            // ADAPTIVE: minors thin along the 1-2-5 series until they fit;
+            // the heavy line is always `major` DRAWN lines apart
+            every = 1; int k = 0;
+            while (pitch * every * Zoom < minPx && every < 1 << 20)
+            {
+                every = (k % 3) switch { 0 => every * 2, 1 => every * 5 / 2, _ => every * 2 };   // 1,2,5,10,20,50,…
+                k++;
+            }
+            if (pitch * every * Zoom < minPx) return;
+            majorEvery = every * major;
+        }
+        else
+        {
+            // FIXED: thin the MINOR lines only by divisors of the major so a
+            // heavy line is always one of the drawn lines and the pattern
+            // never desyncs (10 → 1,2,5; 8 → 1,2,4). If even the majors are
+            // too dense, drop minors and thin the majors 1-2-5-10….
+            every = 0;
+            foreach (int d in Divisors(major))
+                if (pitch * d * Zoom >= minPx) { every = d; break; }
+            majorEvery = major;
+            if (every == 0)
+            {
+                int m = 1, k = 0;
+                while (pitch * major * m * Zoom < minPx && m < 1 << 20)
+                {
+                    m = (k % 3) switch { 0 => m * 2, 1 => m * 5 / 2, _ => m * 2 };
+                    k++;
+                }
+                majorEvery = major * m;
+                if (pitch * majorEvery * Zoom < minPx) return;
+            }
+        }
+
+        // draw in SCREEN space on whole pixels: crisp 1 px / 2 px lines,
+        // no aliasing from fractional world coordinates
+        var saved = g.Save();
+        g.ResetTransform();
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+        using var minor = new Pen(Color.FromArgb(232, 232, 232), 1f);
+        using var majorPen = new Pen(Color.FromArgb(188, 188, 188), 2f);
+        float sx0 = (float)Math.Round(Pan.X + vb.X * Zoom), sx1 = (float)Math.Round(Pan.X + vb.Right * Zoom);
+        float sy0 = (float)Math.Round(Pan.Y + vb.Y * Zoom), sy1 = (float)Math.Round(Pan.Y + vb.Bottom * Zoom);
+
+        long i0 = (long)Math.Ceiling((vb.X - 1e-9) / pitch), i1 = (long)Math.Floor((vb.Right + 1e-9) / pitch);
+        for (long i = i0; i <= i1; i++)
+        {
+            bool isMajor = i % majorEvery == 0;
+            if (!isMajor && (every == 0 || i % every != 0)) continue;
+            float x = (float)Math.Round(Pan.X + i * pitch * Zoom) + 0.5f;
+            g.DrawLine(isMajor ? majorPen : minor, x, sy0, x, sy1);
+        }
+        long j0 = (long)Math.Ceiling((vb.Y - 1e-9) / pitch), j1 = (long)Math.Floor((vb.Bottom + 1e-9) / pitch);
+        for (long j = j0; j <= j1; j++)
+        {
+            bool isMajor = j % majorEvery == 0;
+            if (!isMajor && (every == 0 || j % every != 0)) continue;
+            float y = (float)Math.Round(Pan.Y + j * pitch * Zoom) + 0.5f;
+            g.DrawLine(isMajor ? majorPen : minor, sx0, y, sx1, y);
+        }
+        g.Restore(saved);
+    }
+
+    /// <summary>Proper divisors of n in ascending order (1 first, n excluded).</summary>
+    private static IEnumerable<int> Divisors(int n)
+    {
+        for (int d = 1; d < n; d++) if (n % d == 0) yield return d;
+    }
+
+    /// <summary>Snap order per docs/grid-guides.md: hard grid → magnetic
+    /// (objects; guides in pass 3) → for a DOT grid, re-round the magnetic
+    /// result so edges stay on the lattice (alignment error ≤ ½ dot).</summary>
+    private double Redot(double v) =>
+        _doc!.View.IsDotGrid && _doc.View.SnapGrid ? Geometry.Snap(v, _doc.GridMils) : v;
+    private PointD Redot(PointD p) => new(Redot(p.X), Redot(p.Y));
+    private bool SnapObjects => _doc!.View.SnapObjects;
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -156,12 +271,15 @@ public sealed class CanvasControl : Control
         }
 
         var vb = _doc.ViewBox;
+        _sensitiveFields = null;   // recomputed lazily per paint (metadata may have changed)
         var state = g.Save();
         g.TranslateTransform(Pan.X, Pan.Y);
         g.ScaleTransform((float)Zoom, (float)Zoom);
 
         g.FillRectangle(Brushes.Black, (float)vb.X + 60, (float)vb.Y + 60, (float)vb.W, (float)vb.H);
         g.FillRectangle(Brushes.White, (float)vb.X, (float)vb.Y, (float)vb.W, (float)vb.H);
+
+        if (Mode == EditorMode.Design) DrawGrid(g, vb);
 
         foreach (var o in _doc.Objects)
         {
@@ -208,6 +326,8 @@ public sealed class CanvasControl : Control
 
         g.Restore(state);
 
+        if (GuidesOn) DrawGuides(g);
+
         if (Mode == EditorMode.Design)
         {
             foreach (var o in _sel)
@@ -221,6 +341,276 @@ public sealed class CanvasControl : Control
                     Math.Abs(a.X - b.X), Math.Abs(a.Y - b.Y));
             }
         }
+
+        if (RulersOn) DrawRulers(g);
+    }
+
+    // ---------- guides ----------
+
+    private double GuideScreen(Guide gd) => gd.Vertical ? Pan.X + gd.Pos * Zoom : Pan.Y + gd.Pos * Zoom;
+
+    /// <summary>Operator guides: solid cyan lines across the whole canvas,
+    /// above content, below selection chrome. The one being dragged draws
+    /// at its provisional position (red when over its ruler = delete).</summary>
+    private void DrawGuides(Graphics g)
+    {
+        var view = _doc!.View;
+        int top = RulersOn ? RulerPx : 0;
+        using var pen = new Pen(Color.FromArgb(0, 160, 220), 1f);
+        using var lockPen = new Pen(Color.FromArgb(120, 0, 160, 220), 1f) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash };
+        using var dragPen = new Pen(_guideOverRuler ? Color.Firebrick : Color.FromArgb(0, 120, 200), 1.5f);
+        var sm = g.SmoothingMode; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+        for (int i = 0; i < view.Guides.Count; i++)
+        {
+            if (_guideDrag && _guideIdx == i) continue;      // drawn provisional below
+            var gd = view.Guides[i];
+            float s = (float)Math.Round(GuideScreen(gd)) + 0.5f;
+            var p = view.GuidesLocked ? lockPen : pen;
+            if (gd.Vertical) g.DrawLine(p, s, top, s, Height); else g.DrawLine(p, top, s, Width, s);
+        }
+        if (_guideDrag)
+        {
+            float s = (float)Math.Round(_guideVertical ? Pan.X + _guideDragPos * Zoom : Pan.Y + _guideDragPos * Zoom) + 0.5f;
+            if (_guideVertical) g.DrawLine(dragPen, s, top, s, Height); else g.DrawLine(dragPen, top, s, Width, s);
+            // readout next to the cursor
+            string txt = UnitPrefs.FS(_guideDragPos);
+            var sz = TextRenderer.MeasureText(txt, Font);
+            var at = new Point(Math.Min(_lastMouse.X + 12, Width - sz.Width), Math.Min(_lastMouse.Y + 12, Height - sz.Height));
+            g.FillRectangle(Brushes.White, at.X - 2, at.Y - 1, sz.Width + 4, sz.Height + 2);
+            TextRenderer.DrawText(g, txt, Font, at, Color.Black);
+        }
+        g.SmoothingMode = sm;
+    }
+
+    /// <summary>Index of the guide within 4 px of a screen point, or -1.
+    /// Locked guides never hit (they can't be dragged).</summary>
+    private int HitGuide(Point p)
+    {
+        if (_doc is null || !GuidesOn || _doc.View.GuidesLocked) return -1;
+        var gs = _doc.View.Guides;
+        int best = -1; double bestD = 4.5;
+        for (int i = 0; i < gs.Count; i++)
+        {
+            double d = Math.Abs((gs[i].Vertical ? p.X : p.Y) - GuideScreen(gs[i]));
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+
+    /// <summary>Guide x positions (vertical guides) for snapping — only
+    /// when guides are shown and snap-to-guides is on.</summary>
+    private IReadOnlyList<double>? GuideXs() =>
+        GuidesOn && _doc!.View.SnapGuides ? _doc.View.Guides.Where(g => g.Vertical).Select(g => g.Pos).ToList() : null;
+    private IReadOnlyList<double>? GuideYs() =>
+        GuidesOn && _doc!.View.SnapGuides ? _doc.View.Guides.Where(g => !g.Vertical).Select(g => g.Pos).ToList() : null;
+
+    /// <summary>Which ruler (if any) a screen point is over: 'x' = the top
+    /// ruler (creates HORIZONTAL guides — drag DOWN into the label),
+    /// 'y' = the left ruler (creates VERTICAL guides), ' ' = corner/none.</summary>
+    private char RulerAt(Point p)
+    {
+        if (!RulersOn) return ' ';
+        if (p.X < RulerPx && p.Y < RulerPx) return 'c';
+        if (p.Y < RulerPx) return 'x';
+        if (p.X < RulerPx) return 'y';
+        return ' ';
+    }
+
+    /// <summary>Begin dragging guide `idx` (or a new one when idx = -1).</summary>
+    private void StartGuideDrag(int idx, bool vertical, PointD w, Point screen)
+    {
+        _guideDrag = true; _guideIdx = idx; _guideVertical = vertical;
+        _guideDragPos = vertical ? w.X : w.Y;
+        _guideOverRuler = false;
+        _downScreen = screen;
+        Capture = true;
+        Cursor = vertical ? Cursors.VSplit : Cursors.HSplit;
+        Invalidate();
+    }
+
+    private void UpdateGuideDrag(Point screen, PointD w)
+    {
+        if (_doc is null) return;
+        double pos = _guideVertical ? w.X : w.Y;
+        if (!ModifierKeys.HasFlag(Keys.Alt))
+        {
+            pos = Geometry.Snap(pos, _doc.GridMils);
+            if (SnapObjects)
+            {
+                var (sp, _) = SnapEngine.SnapPoint(new PointD(pos, pos), OthersWorldBounds(includeSelected: true),
+                    _doc.ViewBox, 6 / Zoom, snapX: _guideVertical, snapY: !_guideVertical);
+                pos = Redot(_guideVertical ? sp.X : sp.Y);
+            }
+        }
+        _guideDragPos = pos;
+        char r = RulerAt(screen);
+        _guideOverRuler = _guideVertical ? r == 'y' : r == 'x';
+        Invalidate();
+    }
+
+    private void EndGuideDrag()
+    {
+        if (_doc is null) { _guideDrag = false; return; }
+        var v = _doc.View.Clone();
+        if (_guideOverRuler)
+        {
+            if (_guideIdx >= 0 && _guideIdx < v.Guides.Count)
+            {
+                v.Guides.RemoveAt(_guideIdx);
+                _doc.SetView(v, "delete guide");
+            }
+            // new guide released on the ruler: nothing to do
+        }
+        else if (_guideIdx >= 0 && _guideIdx < v.Guides.Count)
+        {
+            var old = v.Guides[_guideIdx];
+            if (Math.Abs(old.Pos - _guideDragPos) > 1e-9)
+            {
+                v.Guides[_guideIdx] = old with { Pos = _guideDragPos };
+                _doc.SetView(v, "move guide");
+            }
+        }
+        else
+        {
+            v.Guides.Add(new Guide(_guideVertical, _guideDragPos));
+            _doc.SetView(v, "add guide");
+        }
+        _guideDrag = false; _guideIdx = -1; _guideOverRuler = false;
+        Cursor = Cursors.Default;
+        Capture = false;
+        Invalidate();
+    }
+
+    /// <summary>Right-click on a guide.</summary>
+    private void ShowGuideMenu(int idx, Point at)
+    {
+        if (_doc is null) return;
+        var m = new ContextMenuStrip();
+        m.Items.Add("&Edit Guide…", null, (_, _) => EditGuide(idx));
+        m.Items.Add("&Delete Guide", null, (_, _) =>
+        {
+            var v = _doc.View.Clone();
+            if (idx < v.Guides.Count) { v.Guides.RemoveAt(idx); _doc.SetView(v, "delete guide"); Invalidate(); }
+        });
+        m.Items.Add(new ToolStripSeparator());
+        m.Items.Add("&Lock Guides", null, (_, _) =>
+        {
+            var v = _doc.View.Clone(); v.GuidesLocked = true; _doc.SetView(v, "lock guides"); Invalidate();
+        });
+        m.Items.Add("Delete &All Guides", null, (_, _) => DeleteAllGuides());
+        m.Show(this, at);
+    }
+
+    public void EditGuide(int idx)
+    {
+        if (_doc is null || idx < 0 || idx >= _doc.View.Guides.Count) return;
+        if (ViewDialogs.ShowGuide(FindForm()!, _doc.View.Guides[idx]) is { } ng)
+        {
+            var v = _doc.View.Clone();
+            v.Guides[idx] = ng;
+            _doc.SetView(v, "edit guide");
+            Invalidate();
+        }
+    }
+
+    /// <summary>View → Add Guide…</summary>
+    public void AddGuideDialog()
+    {
+        if (_doc is null) return;
+        if (ViewDialogs.ShowGuide(FindForm()!, null) is { } ng)
+        {
+            var v = _doc.View.Clone();
+            v.Guides.Add(ng);
+            _doc.SetView(v, "add guide");
+            Invalidate();
+        }
+    }
+
+    public void DeleteAllGuides()
+    {
+        if (_doc is null || _doc.View.Guides.Count == 0) return;
+        var v = _doc.View.Clone();
+        v.Guides.Clear();
+        _doc.SetView(v, "delete all guides");
+        Invalidate();
+    }
+
+    // ---------- rulers ----------
+
+    /// <summary>Rulers along the top and left, in the display unit, origin
+    /// at the viewBox origin. Labelled ticks follow a 1-2-5 series so they
+    /// stay ≥ ~60 px apart; minor ticks at 1/5 (or 1/2) when they fit. A red
+    /// hairline tracks the cursor; the corner shows the unit.</summary>
+    private void DrawRulers(Graphics g)
+    {
+        var unit = UnitPrefs.Current;
+        double dpmm = UnitPrefs.DotsPerMm;
+        double unitMils = Units.ToMils(1, unit, dpmm);            // mils per display unit
+        double pxPerUnit = unitMils * Zoom;
+
+        // labelled step in display units: 1-2-5 series, ≥ 60 px
+        double step = 1; int k = 0;
+        while (step * pxPerUnit < 60) { step = (k % 3) switch { 0 => step * 2, 1 => step * 2.5, _ => step * 2 }; k++; }
+        while (step * pxPerUnit >= 300 && step > 1e-6) { step = (k % 3) switch { 1 => step / 2, 2 => step / 2.5, _ => step / 2 }; k--; }
+        double minorDiv = step * pxPerUnit / 5 >= 6 ? 5 : step * pxPerUnit / 2 >= 6 ? 2 : 1;
+        double minor = step / minorDiv;
+
+        var bg = Color.FromArgb(245, 245, 245);
+        var fg = Color.FromArgb(60, 60, 60);
+        using var bgBrush = new SolidBrush(bg);
+        using var line = new Pen(Color.FromArgb(160, 160, 160), 1f);
+        using var tick = new Pen(fg, 1f);
+        using var cursorPen = new Pen(Color.Firebrick, 1f);
+        using var font = new Font(Font.FontFamily, 7f);
+        var sm = g.SmoothingMode; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+
+        // strips
+        g.FillRectangle(bgBrush, 0, 0, Width, RulerPx);
+        g.FillRectangle(bgBrush, 0, 0, RulerPx, Height);
+        g.DrawLine(line, 0, RulerPx - 0.5f, Width, RulerPx - 0.5f);
+        g.DrawLine(line, RulerPx - 0.5f, 0, RulerPx - 0.5f, Height);
+
+        // top ruler (x)
+        double u0 = Math.Floor((RulerPx - Pan.X) / pxPerUnit / minor) * minor;
+        double u1 = (Width - Pan.X) / pxPerUnit;
+        for (double u = u0; u <= u1; u += minor)
+        {
+            float x = (float)Math.Round(Pan.X + u * pxPerUnit) + 0.5f;
+            if (x < RulerPx) continue;
+            bool isLabel = Math.Abs(u / step - Math.Round(u / step)) < 1e-6;
+            g.DrawLine(tick, x, isLabel ? 8 : RulerPx - 6, x, RulerPx - 1);
+            if (isLabel)
+                TextRenderer.DrawText(g, Num.F(Math.Round(u, 6)), font, new Point((int)x + 2, 0), fg, TextFormatFlags.NoPadding);
+        }
+        // left ruler (y): labels drawn rotated
+        double v0 = Math.Floor((RulerPx - Pan.Y) / pxPerUnit / minor) * minor;
+        double v1 = (Height - Pan.Y) / pxPerUnit;
+        for (double u = v0; u <= v1; u += minor)
+        {
+            float y = (float)Math.Round(Pan.Y + u * pxPerUnit) + 0.5f;
+            if (y < RulerPx) continue;
+            bool isLabel = Math.Abs(u / step - Math.Round(u / step)) < 1e-6;
+            g.DrawLine(tick, isLabel ? 8 : RulerPx - 6, y, RulerPx - 1, y);
+            if (isLabel)
+            {
+                var st = g.Save();
+                g.TranslateTransform(0, y - 2);
+                g.RotateTransform(-90);
+                TextRenderer.DrawText(g, Num.F(Math.Round(u, 6)), font, new Point(0, 0), fg, TextFormatFlags.NoPadding);
+                g.Restore(st);
+            }
+        }
+        // cursor hairlines
+        if (_lastMouse.X >= 0)
+        {
+            g.DrawLine(cursorPen, _lastMouse.X + 0.5f, 0, _lastMouse.X + 0.5f, RulerPx - 1);
+            g.DrawLine(cursorPen, 0, _lastMouse.Y + 0.5f, RulerPx - 1, _lastMouse.Y + 0.5f);
+        }
+        // corner: unit
+        g.FillRectangle(bgBrush, 0, 0, RulerPx, RulerPx);
+        TextRenderer.DrawText(g, Units.Suffix(unit), font, new Rectangle(0, 0, RulerPx, RulerPx), fg,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        g.SmoothingMode = sm;
     }
 
     private void DrawObject(Graphics g, EditorObject o)
@@ -266,10 +656,10 @@ public sealed class CanvasControl : Control
                 // draw the REAL symbol (fill-the-box, same rule as every
                 // print path) so the canvas is honest about proportions;
                 // unresolved fields encode a sample so the box reads true
-                string content = ResolvedContent(o)
-                    ?? (string?)o.El.Attribute("data-value")
+                string sample = (string?)o.El.Attribute("data-value")
                     ?? (string?)o.El.Attribute("data-field")
                     ?? "SAMPLE";
+                string content = Shown(o, ResolvedContent(o) ?? sample, sample);
                 bool drawn = LabelRenderer.DrawBarcode(g, b, sym, content,
                     (string?)o.El.Attribute("data-ecc"),
                     (int)o.GetNum("data-columns", 0),
@@ -299,7 +689,7 @@ public sealed class CanvasControl : Control
                 // ONE text renderer for canvas and print (baseline-exact,
                 // multiline, shrink squeeze, box alignment) - WYSIWYG by
                 // construction; rotation is already on the Graphics above
-                LabelRenderer.DrawText(g, o, ResolvedContent(o) ?? o.El.Value, _measurer);
+                LabelRenderer.DrawText(g, o, Shown(o, ResolvedContent(o) ?? o.El.Value, o.El.Value), _measurer);
                 break;
             }
             case ObjectKind.Image:
@@ -318,11 +708,23 @@ public sealed class CanvasControl : Control
         }
     }
 
+    /// <summary>Screen redaction: a data-sensitive element shows its stand-in
+    /// (View → Redact Sensitive) instead of `real`. Print paths never come
+    /// through here.</summary>
+    private HashSet<string>? _sensitiveFields;   // per paint, when redacting
+    private string Shown(EditorObject o, string real, string placeholder)
+    {
+        if (!UnitPrefs.Redact) return real;
+        _sensitiveFields ??= Redaction.AllSensitiveFields(_doc!.Root);
+        return Redaction.IsSensitive(o.El, _sensitiveFields) ? Redaction.Display(o.El, placeholder) : real;
+    }
+
     private string? ResolvedContent(EditorObject o)
     {
-        if (ResolvedValues is null) return null;
+        var src = UnitPrefs.Redact && DisplayValues is not null ? DisplayValues : ResolvedValues;
+        if (src is null) return null;
         string? field = (string?)o.El.Attribute("data-field");
-        return field is not null && ResolvedValues.TryGetValue(field, out var v) ? v : null;
+        return field is not null && src.TryGetValue(field, out var v) ? v : null;
     }
 
     private void DrawSelection(Graphics g, EditorObject o, bool primary)
@@ -378,6 +780,8 @@ public sealed class CanvasControl : Control
         }
         if (e.Button == MouseButtons.Right && Mode == EditorMode.Design)
         {
+            int gi = HitGuide(e.Location);
+            if (gi >= 0) { ShowGuideMenu(gi, e.Location); return; }
             var wr = ToWorld(e.Location);
             var rHit = SelectionFirstHit(wr) ?? _doc.HitTest(wr, 3 / Zoom);
             if (rHit is not null)
@@ -403,6 +807,17 @@ public sealed class CanvasControl : Control
         _gesture++;
         double r = 6 / Zoom;
 
+        // rulers: drag out of the top ruler = new horizontal guide, out of
+        // the left ruler = new vertical guide (corner does nothing). Locked
+        // guides = no mouse changes at all, new ones included; View → Add
+        // Guide… remains the deliberate route.
+        switch (RulerAt(e.Location))
+        {
+            case 'x': if (!_doc.View.GuidesLocked) StartGuideDrag(-1, vertical: false, w, e.Location); return;
+            case 'y': if (!_doc.View.GuidesLocked) StartGuideDrag(-1, vertical: true, w, e.Location); return;
+            case 'c': return;
+        }
+
         // line endpoint handles: single selected line only
         if (_sel.Count == 1 && Selected!.Kind == ObjectKind.Line)
         {
@@ -426,6 +841,18 @@ public sealed class CanvasControl : Control
             {
                 _dragHandle = h; _dragPending = true; _downScreen = e.Location; _dragStartW = w;
                 Capture = true; return;
+            }
+        }
+
+        // an unlocked guide under the pointer: arm a guide drag (it starts
+        // past the dead-zone like any drag; a plain click leaves it be)
+        {
+            int gi = HitGuide(e.Location);
+            if (gi >= 0)
+            {
+                _guideArmed = true; _guideIdx = gi; _guideVertical = _doc.View.Guides[gi].Vertical;
+                _downScreen = e.Location; Capture = true;
+                return;
             }
         }
 
@@ -553,10 +980,10 @@ public sealed class CanvasControl : Control
             m.Items.Add(bold);
             m.Items.Add("Font &Size…", null, (_, _) =>
             {
-                string? s = Prompts.PromptText(FindForm()!, "Font size (mils)",
-                    o.GetNum("font-size", 12).ToString("0.###"));
-                if (s is not null && double.TryParse(s, out var v) && v > 0)
-                { _doc.Undo.Push(o.SetAttr("font-size", s, "font size")); Changed(); }
+                string? s = Prompts.PromptText(FindForm()!, "Font size (pt)",
+                    Units.FormatPoints(o.GetNum("font-size", 12)));
+                if (s is not null && Units.TryParsePoints(s, out var v) && v > 0)
+                { _doc.Undo.Push(o.SetAttr("font-size", Num.F(v), "font size")); Changed(); }
             });
             // fit modes: dynamic width / squeeze-to-width / shrink-into-box
             var fit = new ToolStripMenuItem("F&it Mode");
@@ -578,7 +1005,7 @@ public sealed class CanvasControl : Control
                     {
                         ("data-fit", (string?)o.El.Attribute("data-fit"), null),
                         ("data-width", (string?)o.El.Attribute("data-width"),
-                         (string?)o.El.Attribute("data-width") ?? b0.W.ToString("0.###")),
+                         (string?)o.El.Attribute("data-width") ?? Num.F(b0.W)),
                     }, "fit mode"));
             });
             FitItem("Fixed &Box (shrink font to fit Width × Height)", "box", () =>
@@ -588,9 +1015,9 @@ public sealed class CanvasControl : Control
                     {
                         ("data-fit", (string?)o.El.Attribute("data-fit"), "box"),
                         ("data-width", (string?)o.El.Attribute("data-width"),
-                         (string?)o.El.Attribute("data-width") ?? b0.W.ToString("0.###")),
+                         (string?)o.El.Attribute("data-width") ?? Num.F(b0.W)),
                         ("data-height", (string?)o.El.Attribute("data-height"),
-                         (string?)o.El.Attribute("data-height") ?? b0.H.ToString("0.###")),
+                         (string?)o.El.Attribute("data-height") ?? Num.F(b0.H)),
                     }, "fit mode"));
             });
             fit.DropDownItems.Add(new ToolStripSeparator());
@@ -712,6 +1139,13 @@ public sealed class CanvasControl : Control
         m.Items.Add(sub);
     }
 
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        _lastMouse = new(-1, -1);
+        if (RulersOn) { Invalidate(new Rectangle(0, 0, Width, RulerPx)); Invalidate(new Rectangle(0, 0, RulerPx, Height)); }
+    }
+
     protected override void OnMouseEnter(EventArgs e)
     {
         base.OnMouseEnter(e);
@@ -719,7 +1153,19 @@ public sealed class CanvasControl : Control
         // (only while our own window is active - never steal across apps,
         // and NEVER from the inline text editor: stealing its focus fires
         // LostFocus and closes it the moment the mouse re-enters the canvas)
-        if (_inlineEdit is null && !Focused && FindForm() is { ContainsFocus: true }) Focus();
+        // ...and never from a text-entry control (data panel / print
+        // station): grabbing focus mid-entry as the pointer brushes the
+        // canvas would kill the operator's caret
+        if (_inlineEdit is null && !Focused && FindForm() is { ContainsFocus: true } form &&
+            FindFocusedControl(form) is not (TextBox or ComboBox or NumericUpDown))
+            Focus();
+    }
+
+    private static Control? FindFocusedControl(ContainerControl top)
+    {
+        Control? c = top.ActiveControl;
+        while (c is ContainerControl cc && cc.ActiveControl is not null) c = cc.ActiveControl;
+        return c;
     }
 
     /// <summary>The selection UNIT under `context`: the outermost plain
@@ -751,6 +1197,10 @@ public sealed class CanvasControl : Control
             return;
         }
         if (_doc is null || Mode != EditorMode.Design) return;
+        {
+            int gi = HitGuide(e.Location);
+            if (gi >= 0) { _guideArmed = false; Capture = false; EditGuide(gi); return; }
+        }
         var hit = _doc.HitTest(ToWorld(e.Location), 3 / Zoom);
         if (hit is null) return;
         // Rule: each double-click drills ONE level deeper (groups nest);
@@ -868,6 +1318,32 @@ public sealed class CanvasControl : Control
         }
         var w = ToWorld(e.Location);
         CursorWorldMoved?.Invoke(w);
+        var prevMouse = _lastMouse;
+        _lastMouse = e.Location;
+        if (RulersOn && !_guideDrag && !_dragging && !_marquee)
+        {
+            // only the ruler strips need repainting for the cursor hairlines
+            Invalidate(new Rectangle(0, 0, Width, RulerPx));
+            Invalidate(new Rectangle(0, 0, RulerPx, Height));
+        }
+
+        if (_guideArmed)
+        {
+            int tx = Math.Max(SystemInformation.DragSize.Width, 8) / 2;
+            if (Math.Abs(e.X - _downScreen.X) <= tx && Math.Abs(e.Y - _downScreen.Y) <= tx) return;
+            _guideArmed = false;
+            StartGuideDrag(_guideIdx, _guideVertical, w, e.Location);
+        }
+        if (_guideDrag) { UpdateGuideDrag(e.Location, w); return; }
+
+        if (!_dragging && !_dragPending && !_marquee && _doc is not null && Mode == EditorMode.Design)
+        {
+            // hover feedback: guides and rulers
+            char ru = RulerAt(e.Location);
+            int gi = ru == ' ' ? HitGuide(e.Location) : -1;
+            Cursor = gi >= 0 ? (_doc.View.Guides[gi].Vertical ? Cursors.VSplit : Cursors.HSplit)
+                   : ru is 'x' or 'y' && !_doc.View.GuidesLocked ? Cursors.Hand : Cursors.Default;
+        }
 
         if (_marquee)
         {
@@ -894,11 +1370,12 @@ public sealed class CanvasControl : Control
         {
             var p = noSnap ? w : Geometry.Snap(w, _doc.GridMils);
             _guides = new();
-            if (!noSnap)
+            if (!noSnap && (SnapObjects || GuideXs() is not null))
             {
                 var (sp, guides) = SnapEngine.SnapPoint(
-                    p, OthersWorldBounds(), _doc.ViewBox, 6 / Zoom);
-                p = sp; _guides = guides;
+                    p, SnapObjects ? OthersWorldBounds() : new List<RectD>(), SnapObjects ? _doc.ViewBox : null,
+                    6 / Zoom, true, true, GuideXs(), GuideYs());
+                p = Redot(sp); _guides = guides;
             }
             _doc.Undo.Push(Selected.SetLineEndpoint(le, p));
             Invalidate();
@@ -915,13 +1392,14 @@ public sealed class CanvasControl : Control
             // this handle actually moves. Rotated objects keep grid snapping
             // only (the handle moves in object space; edge candidates are in
             // world space, so mixing them would snap to the wrong lines).
-            if (!noSnap && s.RotationDeg == 0)
+            if (!noSnap && (SnapObjects || GuideXs() is not null) && s.RotationDeg == 0)
             {
                 bool sx = h is not (Core.Handle.N or Core.Handle.S);
                 bool sy = h is not (Core.Handle.E or Core.Handle.W);
                 var (sp, guides) = SnapEngine.SnapPoint(
-                    snapped, OthersWorldBounds(), _doc.ViewBox, 6 / Zoom, sx, sy);
-                snapped = sp; _guides = guides;
+                    snapped, SnapObjects ? OthersWorldBounds() : new List<RectD>(), SnapObjects ? _doc.ViewBox : null,
+                    6 / Zoom, sx, sy, GuideXs(), GuideYs());
+                snapped = Redot(sp); _guides = guides;
             }
             _doc.Undo.Push(s.Resize(
                 Geometry.ResizeBy(s.Bounds(_measurer), h, snapped, min: 10), _measurer));
@@ -935,14 +1413,22 @@ public sealed class CanvasControl : Control
         double totalY = w.Y - _dragStartW.Y;
         if (!noSnap)
         {
-            totalX = Geometry.Snap(totalX, _doc.GridMils);
-            totalY = Geometry.Snap(totalY, _doc.GridMils);
-            var target = new RectD(_dragOrigBounds.X + totalX, _dragOrigBounds.Y + totalY,
-                                   _dragOrigBounds.W, _dragOrigBounds.H);
-            var (adjX, adjY, guides) = SnapEngine.Adjust(
-                target, OthersWorldBounds(), _doc.ViewBox, 6 / Zoom);
-            _guides = guides;
-            totalX += adjX; totalY += adjY;
+            // grid snaps the selection's top-left onto the lattice (absolute),
+            // not the delta — so a dot grid actually lands objects on dots
+            totalX = Geometry.Snap(_dragOrigBounds.X + totalX, _doc.GridMils) - _dragOrigBounds.X;
+            totalY = Geometry.Snap(_dragOrigBounds.Y + totalY, _doc.GridMils) - _dragOrigBounds.Y;
+            if (SnapObjects || GuideXs() is not null)
+            {
+                var target = new RectD(_dragOrigBounds.X + totalX, _dragOrigBounds.Y + totalY,
+                                       _dragOrigBounds.W, _dragOrigBounds.H);
+                var (adjX, adjY, guides) = SnapEngine.Adjust(
+                    target, SnapObjects ? OthersWorldBounds() : new List<RectD>(), SnapObjects ? _doc.ViewBox : null,
+                    6 / Zoom, GuideXs(), GuideYs());
+                _guides = guides;
+                totalX = Redot(_dragOrigBounds.X + totalX + adjX) - _dragOrigBounds.X;
+                totalY = Redot(_dragOrigBounds.Y + totalY + adjY) - _dragOrigBounds.Y;
+            }
+            else _guides = new();
         }
         else
         {
@@ -961,6 +1447,8 @@ public sealed class CanvasControl : Control
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
+        if (_guideArmed) { _guideArmed = false; _guideIdx = -1; Capture = false; return; }
+        if (_guideDrag) { EndGuideDrag(); return; }
         if (_marquee && _doc is not null)
         {
             var rect = RectD.FromCorners(_dragStartW, _marqueeEndW);
