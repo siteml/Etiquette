@@ -154,6 +154,7 @@ public static class PrintService
         };
 
         int copies = 1;   // dialog copies, expanded into pages (see below)
+        var records = pages;   // the distinct labels, as logged — pages may be expanded
         if (direct)
         {
             if (!string.IsNullOrWhiteSpace(printer))
@@ -181,7 +182,8 @@ public static class PrintService
             // — their copies live in their own Options tab. Expand the
             // count into pages (collated: whole batch repeated; uncollated:
             // each label repeated) and hand the driver a 1-copy job, so
-            // every printer behaves the same and the log sees each label.
+            // every printer behaves the same. The LOG still gets one row per
+            // distinct label (with a copies field), not one per physical copy.
             copies = pd.PrinterSettings.Copies;
             if (copies > 1)
             {
@@ -252,6 +254,11 @@ public static class PrintService
             {
                 pd.DefaultPageSettings.PaperSize = paper;
                 pd.DefaultPageSettings.Landscape = vb.W > vb.H;
+                // label stock: one DEVMODE for the whole job, no per-page
+                // ResetDC — the standard controller's ResetDC before every
+                // page makes Zebra stop/backfeed between labels instead of
+                // running the set in one go (see LabelPrintController)
+                pd.PrintController = new LabelPrintController();
             }
             (offX, offY) = GetOffset(pd.PrinterSettings.PrinterName);
             page = 0;
@@ -260,15 +267,16 @@ public static class PrintService
                        (sheet ? $"(sheet orientation setting: {UnitPrefs.SheetOrientation}) " : "") +
                        $"{dps.PaperSize.PaperName} {dps.PaperSize.Width / 100.0:0.##}×{dps.PaperSize.Height / 100.0:0.##} in, " +
                        $"{(dps.Landscape ? "landscape" : "portrait")}, hard margin {dps.HardMarginX / 100.0:0.##}/{dps.HardMarginY / 100.0:0.##} in, " +
-                       $"offset {offX}/{offY} mils, {pages.Count} page(s)" +
+                       $"offset {offX}/{offY} mils, {pages.Count} page(s), " +
+                       $"{(sheet ? "standard controller (ResetDC per page)" : "label controller (one DEVMODE, no ResetDC)")}" +
                        (copies > 1 ? $" ({copies} copies expanded, driver copies=1)" : "");
             pd.Print();
             // spooled ≠ printed: log each label's values (the reprintable
             // record), then watch the queue for the job's real fate
             string printerName = pd.PrinterSettings.PrinterName;
-            for (int i = 0; i < pages.Count; i++)
+            for (int i = 0; i < records.Count; i++)
                 PrintLog.Append(job, "spooled", template, printerName,
-                                page: i + 1, pages: pages.Count, values: pages[i]);
+                                page: i + 1, pages: records.Count, values: records[i], copies: copies);
             if (PrintLog.Directory is not null)
                 SpoolWatcher.Watch(printerName, pd.DocumentName, job, template);
         }
