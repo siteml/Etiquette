@@ -4,6 +4,18 @@ All notable changes to Etiquette are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver
 (pre-1.0: minor bumps may change behavior).
 
+## [0.10.2] — 2026-09-08
+
+### Fixed
+- **Label printers run a multi-label job as one continuous set.** .NET's
+  standard print controller calls `ResetDC` before every page; Zebra
+  ZDesigner treats that as a new form and stops between labels (tear-off
+  backfeed, re-feed, on some heads a skipped label). Label mode now
+  prints through a small GDI controller — one DEVMODE at `CreateDC`, then
+  `StartDoc` / `StartPage`…`EndPage` / `EndDoc`, the loop labelprint
+  uses — so batches and copies stream back-to-back. Sheet (office) mode
+  is unchanged. Help → Last Print Details… names the controller used.
+
 ## [0.10.1] — 2026-09-08
 
 ### Fixed
@@ -17,14 +29,6 @@ All notable changes to Etiquette are documented here. The format follows
   page count and the expansion.
 - Print log: one "spooled" row per distinct label as before — copies are
   recorded as a `copies` field on the row, never as extra rows.
-- **Label printers run a multi-label job as one continuous set.** .NET's
-  standard print controller calls `ResetDC` before every page; Zebra
-  ZDesigner treats that as a new form and stops between labels (tear-off
-  backfeed, re-feed, on some heads a skipped label). Label mode now
-  prints through a small GDI controller — one DEVMODE at `CreateDC`, then
-  `StartDoc` / `StartPage`…`EndPage` / `EndDoc`, the loop labelprint
-  uses — so batches and copies stream back-to-back. Sheet (office) mode
-  is unchanged. Help → Last Print Details… names the controller used.
 
 ## [0.10.0] — 2026-09-07
 
