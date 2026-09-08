@@ -4,6 +4,20 @@ All notable changes to Etiquette are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver
 (pre-1.0: minor bumps may change behavior).
 
+## [0.10.1] — 2026-09-08
+
+### Fixed
+- **Copies from the print dialog now print on label printers.** The
+  dialog's copy count was handed to the driver (DEVMODE `dmCopies`);
+  office and PDF drivers honor it, label drivers (Zebra ZDesigner,
+  Seagull) ignore it and printed one label. Copies are now expanded into
+  pages by the editor (collated: the whole batch repeated; uncollated:
+  each label repeated) and the driver always gets a one-copy job, so
+  every printer behaves the same. Help → Last Print Details… shows the
+  page count and the expansion.
+- Print log: one "spooled" row per distinct label as before — copies are
+  recorded as a `copies` field on the row, never as extra rows.
+
 ## [0.10.0] — 2026-09-07
 
 ### Added

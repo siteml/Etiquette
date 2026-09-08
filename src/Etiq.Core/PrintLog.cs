@@ -26,11 +26,13 @@ public static class PrintLog
         { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull };
 
     /// <summary>One printed label (event "spooled") or a later status
-    /// update for the whole job ("completed" | "error" | "stuck").</summary>
+    /// update for the whole job ("completed" | "error" | "stuck").
+    /// copies = how many times this record was printed in the job (dialog
+    /// copies) — ONE row per distinct label, never one per physical copy.</summary>
     public static void Append(string job, string @event, string? template = null,
                               string? printer = null, int? page = null, int? pages = null,
                               IReadOnlyDictionary<string, string>? values = null,
-                              string? detail = null)
+                              string? detail = null, int? copies = null)
     {
         if (Directory is not { Length: > 0 } dir) return;
         try
@@ -44,6 +46,7 @@ public static class PrintLog
                 ["printer"] = printer,
                 ["page"] = page,
                 ["pages"] = pages,
+                ["copies"] = copies is > 1 ? copies : null,
                 ["station"] = Environment.MachineName,
                 ["user"] = Environment.UserName,
                 ["values"] = values,

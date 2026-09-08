@@ -59,7 +59,8 @@ public static class PrintService
         => PrintBatch(owner, doc, new[] { values }, measurer);
 
     /// <summary>Batch: one page per value set (the print-station "one label
-    /// per list row" path). Driver-level copies multiply the whole batch.</summary>
+    /// per list row" path). Copies chosen in the print dialog multiply the
+    /// whole batch — expanded into pages here, never left to the driver.</summary>
     public static void PrintBatch(IWin32Window owner, EditorDoc doc,
                                   IReadOnlyList<IReadOnlyDictionary<string, string>?> pages,
                                   ITextMeasurer measurer)
@@ -152,6 +153,7 @@ public static class PrintService
             e.HasMorePages = page < pages.Count;
         };
 
+        int copies = 1;   // dialog copies, expanded into pages (see below)
         if (direct)
         {
             if (!string.IsNullOrWhiteSpace(printer))
@@ -173,6 +175,25 @@ public static class PrintService
                 Document = pd, UseEXDialog = true, AllowSomePages = false,
             };
             if (dlg.ShowDialog(owner) != DialogResult.OK) return;
+            // COPIES are ours, not the driver's. The dialog writes them into
+            // DEVMODE dmCopies; office and PDF drivers honor that, label
+            // drivers (Zebra ZDesigner, Seagull) ignore it and print once
+            // — their copies live in their own Options tab. Expand the
+            // count into pages (collated: whole batch repeated; uncollated:
+            // each label repeated) and hand the driver a 1-copy job, so
+            // every printer behaves the same and the log sees each label.
+            copies = pd.PrinterSettings.Copies;
+            if (copies > 1)
+            {
+                var expanded = new List<IReadOnlyDictionary<string, string>?>(pages.Count * copies);
+                if (pd.PrinterSettings.Collate)
+                    for (int c = 0; c < copies; c++) expanded.AddRange(pages);
+                else
+                    foreach (var p in pages)
+                        for (int c = 0; c < copies; c++) expanded.Add(p);
+                pages = expanded;   // captured by PrintPage — same variable
+                pd.PrinterSettings.Copies = 1;
+            }
             // designed-for vs printing-at: the template may carry the head
             // density its dot grid was built on (etiq:view dots-per-mm); the
             // driver reports the queue's real resolution. Numbers only —
@@ -239,7 +260,8 @@ public static class PrintService
                        (sheet ? $"(sheet orientation setting: {UnitPrefs.SheetOrientation}) " : "") +
                        $"{dps.PaperSize.PaperName} {dps.PaperSize.Width / 100.0:0.##}×{dps.PaperSize.Height / 100.0:0.##} in, " +
                        $"{(dps.Landscape ? "landscape" : "portrait")}, hard margin {dps.HardMarginX / 100.0:0.##}/{dps.HardMarginY / 100.0:0.##} in, " +
-                       $"offset {offX}/{offY} mils";
+                       $"offset {offX}/{offY} mils, {pages.Count} page(s)" +
+                       (copies > 1 ? $" ({copies} copies expanded, driver copies=1)" : "");
             pd.Print();
             // spooled ≠ printed: log each label's values (the reprintable
             // record), then watch the queue for the job's real fate

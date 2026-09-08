@@ -1,6 +1,6 @@
 # Roadmap
 
-Where Etiquette is and where it's going. Current release: **v0.10.0**
+Where Etiquette is and where it's going. Current release: **v0.10.1**
 (see the Releases page; `etiqedit` checks it via Help → Check for Updates).
 
 Legend: `[x]` done · `[~]` partially done · `[ ]` not started.
