@@ -153,8 +153,13 @@ public static class UpdateChecker
         set => SaveSetting("autoUpdateCheck", value ? null : "false");
     }
 
-    /// <summary>CHANGELOG.md from the repo's default branch — shown in the
-    /// update dialog. Null on any failure (the dialog copes).</summary>
+    /// <summary>CHANGELOG.md from the repo's default branch — the caller
+    /// slices it to the releases between the user's version and the offered
+    /// one (Changelog.Between), so main being ahead of the release is
+    /// harmless and a wrong entry is fixed by a push (raw CDN caches ~5
+    /// min). Deliberately NOT the tag's copy: a tag is immutable, so a bad
+    /// changelog there could only be fixed by moving the tag. Null on any
+    /// failure (the dialog copes).</summary>
     public static async Task<string?> FetchChangelogAsync(string repo = Repo)
     {
         try

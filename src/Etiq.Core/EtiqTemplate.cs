@@ -230,8 +230,15 @@ public sealed class EtiqTemplate
         /// data panel (prompt/override/list fields).</summary>
         public bool PanelHide => (string?)El.Attribute("panel") == "hide";
         /// <summary>source=prompt: default= prefills the data-panel box
-        /// (and Clear restores it rather than blanking).</summary>
+        /// (and Clear restores it rather than blanking — unless
+        /// clear="blank").</summary>
         public string? Default => (string?)El.Attribute("default");
+        /// <summary>source=prompt: what the data panel's Clear does to this
+        /// box — "default" (absent): back to default=, or empty when there is
+        /// none; "blank": always empty, even with a default. A cleared box
+        /// has nothing to redact; a restored default that is sensitive is
+        /// redacted the moment it lands.</summary>
+        public bool ClearBlank => (string?)El.Attribute("clear") == "blank";
         public string? Query => (string?)El.Attribute("query");
         public string? Pick => (string?)El.Attribute("pick");
         public string? FilePath => (string?)El.Attribute("path");
@@ -268,6 +275,61 @@ public sealed class EtiqTemplate
     }
 
     public List<Field> Fields { get; } = new();
+
+    /// <summary>The declared fields whose value can reach a REMOTE fetch:
+    /// referenced as {Field} by a source's param-/filter-/baq/query, or as
+    /// the filter-ref of a query-fed list — directly, or through any chain
+    /// of compose segments / variant switches that ends there. A prompt
+    /// UI debounces entry into these (a fetch per keystroke is the thing
+    /// to avoid) and can resolve everything else on the spot. Empty when
+    /// the template declares no sources.</summary>
+    public HashSet<string> FieldsFeedingRemote()
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        if (Sources.Count == 0) return result;
+        // who reads whom: dependents[X] = fields whose value derives from X
+        var dependents = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        void Dep(string? refName, string dependent)
+        {
+            if (string.IsNullOrEmpty(refName)) return;
+            if (!dependents.TryGetValue(refName, out var set))
+                dependents[refName] = set = new HashSet<string>(StringComparer.Ordinal);
+            set.Add(dependent);
+        }
+        foreach (var f in Fields)
+        {
+            Dep(f.SwitchOn, f.Name);
+            foreach (var s in f.Segs) Dep(s.Ref, f.Name);
+            foreach (var v in f.Variants) foreach (var s in v.Segs) Dep(s.Ref, f.Name);
+        }
+        // seeds: fields a source or query-fed list reads directly
+        var seeds = new HashSet<string>(StringComparer.Ordinal);
+        static string? Braced(string? raw) =>
+            raw is { Length: > 2 } && raw[0] == '{' && raw[^1] == '}' ? raw[1..^1] : null;
+        foreach (var src in Sources)
+        {
+            foreach (var raw in src.Params.Values.Concat(src.Filters.Values).Append(src.Baq).Append(src.Query))
+                if (Braced(raw) is { } n) seeds.Add(n);
+        }
+        foreach (var l in Lists)
+            if (!string.IsNullOrEmpty(l.From) && !string.IsNullOrEmpty(l.FilterRef)) seeds.Add(l.FilterRef);
+        // walk UPSTREAM: anything the seeds derive from feeds remote too
+        var upstream = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var (src, deps) in dependents)
+            foreach (var d in deps)
+            {
+                if (!upstream.TryGetValue(d, out var list)) upstream[d] = list = new List<string>();
+                list.Add(src);
+            }
+        var stack = new Stack<string>(seeds);
+        while (stack.Count > 0)
+        {
+            var n = stack.Pop();
+            if (!result.Add(n)) continue;
+            if (upstream.TryGetValue(n, out var ups)) foreach (var u in ups) stack.Push(u);
+        }
+        return result;
+    }
     public List<XElement> DynamicTexts { get; } = new();   // <text>/<tspan> with data-field
     public List<BarcodeRect> Barcodes { get; } = new();
     public List<MapDef> Maps { get; } = new();

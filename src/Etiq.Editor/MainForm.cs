@@ -15,6 +15,12 @@ public sealed class MainForm : Form
     private readonly TreeView _outline = new() { Dock = DockStyle.Fill, HideSelection = false };
     private readonly InspectorPanel _props = new() { Dock = DockStyle.Fill };
     private readonly Panel _dataPanel = new() { Dock = DockStyle.Fill, AutoScroll = true, Visible = false };
+    /// <summary>docs/data-flow.md §7: data-panel inputs whose field (or, for
+    /// a picker, any field reading its list) is in the snapshot's errors —
+    /// drawn with a thin red outline by the panel's Paint. The canvas just
+    /// draws the element empty.</summary>
+    private readonly HashSet<Control> _erroredInputs = new();
+    private bool _errorPaintHooked;
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _statusPos = new("x: -, y: -");
     private readonly ToolStripStatusLabel _statusGrid = new("grid: off")
@@ -41,7 +47,13 @@ public sealed class MainForm : Form
     private ComboBox? _panelCollate;
     private CheckBox? _panelPrinterDefault;           // etiq:panel printer="embedded"
     private ComboBox? _panelPrinterBox;
-    private System.Windows.Forms.Timer? _previewTimer; // debounced auto-preview
+    /// <summary>COMMITTED values of the prompts that feed a remote fetch
+    /// (directly or through a compose): what the resolve, the canvas and
+    /// the fetch see. Set on Enter / focus loss, never per keystroke — so a
+    /// job number is looked up exactly once per committed value, the label
+    /// never shows a half-typed key, and a re-commit retries a failed
+    /// lookup. Every other prompt is live.</summary>
+    private readonly Dictionary<string, string> _committed = new();
     // entered data survives panel rebuilds (mode flips, F4 Apply) — the
     // operator's entries belong to the SESSION, not to the panel instance.
     // Cleared when another file is opened.
@@ -49,20 +61,13 @@ public sealed class MainForm : Form
     private readonly Dictionary<string, string> _panelMemoLists = new();
 
     // ---------- remote sources (etiq:source) ----------
-    // machine connection store + session dataset override + one-row-per-
-    // source cache (keyed by source name + resolved param signature so a
-    // changed prompt re-fetches but keystroke-debounced previews don't
-    // hammer the service)
+    // machine connection store + session dataset override + the fetch
+    // cache (docs/data-flow.md §5): rows by signature, failures by
+    // signature AND generation — a commit / Clear / Refresh / dataset
+    // change bumps the generation so a failed lookup retries exactly then
     private ToolStripComboBox? _datasetCombo;
     private string? _sessionDataset;                  // null = machine default
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<
-        string, Dictionary<string, System.Text.Json.JsonElement>> _sourceRows = new();
-    // failed fetches, by the same signature: WITHOUT this every debounce
-    // tick retried a failing call synchronously on the UI thread (up to the
-    // HTTP timeout each time) — the app appeared frozen. A failure is only
-    // retried when the inputs change (new signature) or the user forces it
-    // (Refresh Preview / Clear / dataset change).
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _sourceFails = new();
+    private readonly SourceCache _sources = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte>
         _fetchingSources = new();   // cross-source cycle guard
     // query-fed pick lists (etiq:list from=): fetched row SETS by query
@@ -176,8 +181,13 @@ public sealed class MainForm : Form
     private async Task OfferUpdate(UpdateChecker.Release rel)
     {
         // the update-available window shows the rendered CHANGELOG.md with
-        // Install / Skip this version / Later — the changelog IS the pitch
+        // Install / Skip this version / Later — the changelog IS the pitch.
+        // Sliced to EVERY release between the user's version and the offered
+        // one: a skipped release's notes are the only warning they get about
+        // its behavior changes. Drops [Unreleased] and anything newer.
         string? changelog = await UpdateChecker.FetchChangelogAsync();
+        if (changelog is not null)
+            changelog = Etiq.Core.Changelog.Between(changelog, UpdateChecker.Current, rel.Version);
         switch (UpdateDialogs.ShowChangelog(this, rel.Tag,
                     UpdateChecker.Current.ToString(3), changelog))
         {
@@ -444,7 +454,7 @@ public sealed class MainForm : Form
             if (pick == _sessionDataset) return;
             _sessionDataset = pick;
             _datasetCombo.BackColor = pick is null ? SystemColors.Window : Color.Gold;
-            _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();               // never mix rows across datasets
+            _sources.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();               // never mix rows across datasets
             if (_modeButton.Checked && _doc is not null)
                 BuildDataPanel();
         };
@@ -486,6 +496,7 @@ public sealed class MainForm : Form
         Controls.Add(_status);
         UnitPrefs.DocView = () => _doc?.View;
 
+        _canvas.Captioner = Caption;   // snap hint names objects the way the outline does
         _canvas.SelectionChanged += o =>
         {
             _props.ShowSelection(_doc, o is null ? Array.Empty<EditorObject>() : _canvas.Selection);
@@ -589,7 +600,7 @@ public sealed class MainForm : Form
             using var dlg = new ConnectionsDialog();
             if (dlg.ShowDialog(this) == DialogResult.OK)
             {
-                _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();          // store changed: stale rows out
+                _sources.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();          // store changed: stale rows out
                 PopulateDatasetCombo();
                 if (_modeButton.Checked && _doc is not null) BuildDataPanel();
             }
@@ -677,6 +688,19 @@ public sealed class MainForm : Form
             "&Design Mode", null, (_, _) => _modeButton.Checked = false);
         _viewDataItem = (ToolStripMenuItem)view.DropDownItems.Add(
             "Da&ta Mode", null, (_, _) => _modeButton.Checked = true);
+        // docs/data-flow.md §3: in Design mode, show the last snapshot's
+        // values instead of the design text — a VIEW of it, never an editor
+        var miDataValues = (ToolStripMenuItem)view.DropDownItems.Add(
+            "Show Data &Values", null, (_, _) =>
+            {
+                _canvas.ShowDataValues = !_canvas.ShowDataValues;
+                _canvas.Invalidate();
+            });
+        view.DropDownOpening += (_, _) =>
+        {
+            miDataValues.Enabled = _canvas.Mode == EditorMode.Design && _canvas.HasSnapshot;
+            miDataValues.Checked = _canvas.ShowDataValues;
+        };
         view.DropDownItems.Add(new ToolStripSeparator());
         var miFit = (ToolStripMenuItem)view.DropDownItems.Add(
             "&Fit to Window", null, (_, _) => _canvas.FitToWindow());
@@ -1044,7 +1068,7 @@ public sealed class MainForm : Form
     {
         if (_doc is null || !ConfirmDiscard()) return;
         _doc = null;
-        _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();
+        _sources.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();
         _canvas.Doc = null;          // fires SelectionChanged(null) → inspector clears
         SyncViewDependents(force: true);
         RefreshOutline();
@@ -1089,7 +1113,8 @@ public sealed class MainForm : Form
         SyncViewDependents(force: true);
         UpdateStatusInfo();
         UpdateTitle();
-        _sourceRows.Clear(); _sourceFails.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();                 // rows belong to the previous doc
+        _sources.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();                 // rows belong to the previous doc
+        _canvas.Snapshot = PreviewSnapshot.Empty; _canvas.ShowDataValues = false;                      // so does the snapshot
         _panelMemoPrompts.Clear(); _panelMemoLists.Clear();               // so do the operator's entries
         PushRecent(path);
         RefreshOutline();
@@ -1172,7 +1197,7 @@ public sealed class MainForm : Form
     {
         if (_doc is null) return;
         using var measurer = new GdiTextMeasurer();
-        PrintService.Print(this, _doc, _canvas.ResolvedValues, measurer);
+        PrintService.Print(this, _doc, _canvas.HasSnapshot ? _canvas.Snapshot.Values : null, measurer);
         ShowPrintInfo();
     }
 
@@ -1200,15 +1225,17 @@ public sealed class MainForm : Form
         (panel.Collate == "grouped" || _panelCollate is null || _panelCollate.SelectedIndex != 1));
 
     /// <summary>Panel-driven single-label print: copies expanded into
-    /// pages; direct mode goes straight to the (named or default) printer
-    /// with no system dialog — the labelprint behavior.</summary>
+    /// pages by PrintService (logged as ONE record with a copies field, not
+    /// one row per copy); direct mode goes straight to the (named or
+    /// default) printer with no system dialog — the labelprint behavior.</summary>
     private void PrintNow(EtiqTemplate.PanelDef panel, int copies)
     {
         if (_doc is null) return;
         using var measurer = new GdiTextMeasurer();
-        var pages = Enumerable.Repeat(_canvas.ResolvedValues, Math.Max(1, copies)).ToList();
-        PrintService.PrintBatch(this, _doc, pages, measurer,
-            direct: panel.Print == "direct", printer: PanelPrinter(panel));
+        PrintService.PrintBatch(this, _doc,
+            new IReadOnlyDictionary<string, string>?[] { _canvas.Snapshot.Values }, measurer,
+            direct: panel.Print == "direct", printer: PanelPrinter(panel),
+            copies: Math.Max(1, copies));
         ShowPrintInfo();
     }
 
@@ -1242,8 +1269,8 @@ public sealed class MainForm : Form
     private Dictionary<string, string> SampleValues()
     {
         var d = new Dictionary<string, string>();
-        if (_canvas.ResolvedValues is { } rv)
-            foreach (var (k, v) in rv) d[k] = v;
+        if (_canvas.HasSnapshot)
+            foreach (var (k, v) in _canvas.Snapshot.Values) d[k] = v;
         if (_doc is null) return d;
         foreach (var el in _doc.Xml.Descendants())
         {
@@ -1716,16 +1743,17 @@ public sealed class MainForm : Form
     /// no open document the log is view-only.</summary>
     private void ShowPrintLog()
     {
-        Action<Dictionary<string, string>>? reprint = null;
+        Action<Dictionary<string, string>, int>? reprint = null;
         if (_doc is not null)
         {
-            reprint = values =>
+            reprint = (values, copies) =>
             {
                 var panel = EtiqTemplate.Parse(_doc.Xml.ToString()).Panel;
                 using var measurer = new GdiTextMeasurer();
                 PrintService.PrintBatch(this, _doc,
                     new IReadOnlyDictionary<string, string>?[] { values }, measurer,
-                    direct: panel.Print == "direct", printer: PanelPrinter(panel));
+                    direct: panel.Print == "direct", printer: PanelPrinter(panel),
+                    copies: copies);
             };
         }
         using var dlg = new PrintLogDialog(this, reprint);
@@ -1789,11 +1817,9 @@ public sealed class MainForm : Form
             _canvas.Select(null);
             BuildDataPanel();
         }
-        else
-        {
-            _canvas.ResolvedValues = null;
-            _canvas.DisplayValues = null;
-        }
+        // Design mode keeps the snapshot as-is (it is the memory; Clear
+        // empties it) and shows design or data values per View → Show Data
+        // Values. No input handlers run in Design; nothing recomputes.
         _canvas.Invalidate();
     }
 
@@ -1809,15 +1835,28 @@ public sealed class MainForm : Form
 
     private void BuildDataPanel()
     {
-        _previewTimer?.Stop();
-        _previewTimer?.Dispose();
-        _previewTimer = null;
         _dataPanel.SuspendLayout();
+        _erroredInputs.Clear();
+        if (!_errorPaintHooked)
+        {
+            _errorPaintHooked = true;
+            _dataPanel.Paint += (_, e) =>
+            {
+                using var red = new Pen(Color.Red, 1f);
+                foreach (var c in _erroredInputs)
+                {
+                    if (c.IsDisposed || !c.Visible) continue;
+                    var r = c.Bounds; r.Inflate(2, 2); r.Width -= 1; r.Height -= 1;
+                    e.Graphics.DrawRectangle(red, r);
+                }
+            };
+        }
         // AutoScroll gotcha: controls added while the panel is scrolled are
         // placed relative to the SCROLLED origin — a rebuild after the old
         // panel was scrolled (or after opening another file in Data mode)
         // lands everything outside the viewport and the pane looks empty.
         _dataPanel.AutoScrollPosition = Point.Empty;
+        _canvas.Cleared = false;
         foreach (var (k, tb) in _promptBoxes) _panelMemoPrompts[k] = tb.Text;
         foreach (var (k, cb) in _listCombos) _panelMemoLists[k] = cb.Text;
         var old = _dataPanel.Controls.Cast<Control>().ToList();
@@ -1856,14 +1895,28 @@ public sealed class MainForm : Form
             return;
         }
 
-        // debounced auto-preview: any edit re-resolves ~350ms after the last
-        // keystroke; errors go to the inline status line, never a popup
-        _previewTimer = new System.Windows.Forms.Timer { Interval = 350 };
-        _previewTimer.Tick += async (_, _) => { _previewTimer!.Stop(); await RefreshPreviewAsync(template); };
-        // NULL-SAFE: a panel rebuild disposes the old controls AFTER
-        // clearing _previewTimer — disposing the focused box fires its
-        // Leave handler, which lands here with no timer
-        void Touched() { _previewTimer?.Stop(); _previewTimer?.Start(); }
+        // Preview refresh policy (docs/data-flow.md §4) — ONE rule: every
+        // change recomputes the snapshot on the spot, but a prompt that
+        // feeds a remote fetch contributes its COMMITTED value (Enter /
+        // focus loss / Clear), not its keystrokes. The fetch never sees
+        // "C", "C0", "C08"…, the label never shows a half-typed key, and
+        // there is nothing to debounce. Overlapping recomputes coalesce.
+        var remoteFed = template.FieldsFeedingRemote();
+        _committed.Clear();
+        void Touched()
+        {
+            _canvas.Cleared = false;
+            _ = RefreshPreviewAsync(template);
+        }
+        // commit a fetch-feeding prompt: value changed → new generation
+        // (a failed lookup retries) and recompute
+        void Commit(string field, string text)
+        {
+            if (_committed.TryGetValue(field, out var prev) && prev == text) return;
+            _committed[field] = text;
+            _sources.Bump();
+            Touched();
+        }
 
         // built at runtime, AFTER the form's one-shot DPI scale pass ran —
         // Control.Scale never touches later-added children, so factor every
@@ -1874,8 +1927,10 @@ public sealed class MainForm : Form
         int y = S(12);
         void AddLabel(string text)
         {
+            // explicit height: a Label defaults to 23 px, the row step is
+            // 20 — the overlap painted over the top border of the box below
             _dataPanel.Controls.Add(new Label
-                { Text = text, Left = S(10), Top = y, Width = S(320), AutoSize = false });
+                { Text = text, Left = S(10), Top = y, Width = S(320), Height = S(17), AutoSize = false });
             y += S(20);
         }
 
@@ -1906,10 +1961,24 @@ public sealed class MainForm : Form
                 tb.Text = dflt;   // prefill; Clear restores it too
             if (_panelMemoPrompts.TryGetValue(f.Name, out var memo))
                 tb.Text = memo;   // this session's entry survives rebuilds
-            tb.TextChanged += (_, _) => Touched();
-            // remote sources gate on focus (see FetchSourceColumn): leaving
-            // the box is the "entry done" signal, so refresh again then
-            tb.Leave += (_, _) => Touched();
+            if (remoteFed.Contains(f.Name))
+            {
+                // committed-value prompt: keystrokes change nothing on the
+                // label; Enter or focus loss commits. Commit runs
+                // synchronously in Leave so a Print click that took the focus
+                // already sees the new value when its handler runs.
+                _committed[f.Name] = tb.Text;
+                tb.TextChanged += (_, _) => _canvas.Cleared = false;
+                tb.Leave += (_, _) => Commit(f.Name, tb.Text);
+                tb.KeyDown += (_, e) =>
+                {
+                    if (e.KeyCode != Keys.Enter) return;
+                    e.SuppressKeyPress = true;
+                    Commit(f.Name, tb.Text);
+                };
+            }
+            else
+                tb.TextChanged += (_, _) => Touched();
             _promptBoxes[f.Name] = tb;
             _dataPanel.Controls.Add(tb);
             y += S(34);
@@ -2056,12 +2125,14 @@ public sealed class MainForm : Form
                 {
                     case "preview":
                         Btn("Refresh Preview", 110, async () =>
-                            { _sourceFails.Clear(); _listRowFails.Clear(); _listRowSig.Clear(); _listRowSets.Clear(); await RefreshPreviewAsync(template); });
+                            { _sources.Clear(); _listRowFails.Clear(); _listRowSig.Clear(); _listRowSets.Clear(); await RefreshPreviewAsync(template); });
                         break;
                     case "print":
-                        Btn(panel.Print == "direct" ? "Print" : "Print…", 90, () =>
+                        Btn(panel.Print == "direct" ? "Print" : "Print…", 90, async () =>
                         {
-                            if (!RefreshPreview(template)) return;   // never print a failed resolve
+                            // a fresh snapshot, and no error on any bound
+                            // field (`required` = required for PRINTING)
+                            if (!await FreshPreviewAsync(template)) return;
                             PrintNow(panel, PanelRun(panel).Copies);
                         });
                         break;
@@ -2077,16 +2148,26 @@ public sealed class MainForm : Form
                         Btn("Log…", 70, ShowPrintLog);
                         break;
                     case "clear":
-                        Btn("Clear", 90, () =>
+                        Btn("Clear", 90, async () =>
                         {
-                            _previewTimer?.Stop();   // one refresh at the end, not per box
+                            // docs/data-flow.md §6: reset the inputs, then ONE
+                            // ordinary recompute — nothing special-cased
                             foreach (var (name, tb) in _promptBoxes)
-                                tb.Text = template.Fields.FirstOrDefault(f =>
-                                    f.Name == name && f.Source == "prompt")?.Default ?? "";
+                            {
+                                var f = template.Fields.FirstOrDefault(f => f.Name == name && f.Source == "prompt");
+                                // per field: clear="blank" always empties; else back to default=
+                                tb.Text = f is null || f.ClearBlank ? "" : f.Default ?? "";
+                            }
+                            // committed values follow the boxes: Clear IS a commit
+                            foreach (var k in _committed.Keys.ToList())
+                                if (_promptBoxes.TryGetValue(k, out var cbx)) _committed[k] = cbx.Text;
                             // pick lists RESET (default / first row), never blank
                             foreach (var cb in _listCombos.Values) cb.Text = cb.Tag as string ?? "";
                             _panelMemoPrompts.Clear(); _panelMemoLists.Clear();
-                            RefreshPreview(template);
+                            if (_panelCopies is not null) _panelCopies.Value = 1;   // part of the entry
+                            _sources.Clear();                                       // pulled rows go; new generation
+                            _canvas.Cleared = true;   // data-clear="blank" elements draw empty until entry resumes
+                            await RefreshPreviewAsync(template);
                             FocusFirstInput();
                         });
                         break;
@@ -2103,7 +2184,7 @@ public sealed class MainForm : Form
         _dataPanel.Controls.Add(_dataStatus);
         _dataPanel.ResumeLayout();
 
-        RefreshPreview(template);
+        _ = RefreshPreviewAsync(template);
     }
 
     /// <summary>"key — Name" (prefers a column literally named Name, else the
@@ -2229,7 +2310,7 @@ public sealed class MainForm : Form
                             _listRowSig.GetValueOrDefault(listName) == key)
                         {
                             RebuildListItems(template, l, box);   // reports the usable row count
-                            _previewTimer?.Stop(); _previewTimer?.Start();   // = Touched()
+                            _ = RefreshPreviewAsync(template);   // = Touched()
                         }
                     });
                 }
@@ -2428,7 +2509,6 @@ public sealed class MainForm : Form
     /// column. Runs synchronously inside resolve — the preview is already
     /// debounced, and print wants the blocking semantics anyway.</summary>
     private string? FetchSourceColumn(EtiqTemplate template, ResolveContext ctx,
-                                      IReadOnlySet<string> focusedPrompts,
                                       string sourceName, string column)
     {
         var src = template.Sources.FirstOrDefault(x => x.Name == sourceName)
@@ -2452,15 +2532,11 @@ public sealed class MainForm : Form
             string sig = sourceName + "\x1f" + (_sessionDataset ?? "") + "\x1f" + target + "\x1f" +
                 string.Join("\x1f", pars.Concat(fils).OrderBy(kv => kv.Key)
                     .Select(kv => kv.Key + "=" + kv.Value));
-            if (!_sourceRows.TryGetValue(sig, out var row))
+            if (!_sources.TryGetRow(sig, out var row))
             {
-                // NO pull until entry is DONE: every field-fed value must be
-                // non-empty AND its prompt box must not be mid-edit
-                // (focused) — otherwise each keystroke's debounce tick
-                // would hit the service with partial values ("1", "12",
-                // "123"…). The box's Leave handler re-runs the preview once
-                // entry commits; a value already fetched (cache hit above)
-                // stays visible regardless of focus.
+                // NO pull until every field-fed value is non-empty. Partial
+                // entry never reaches here: fetch-feeding prompts contribute
+                // their committed value (Enter / focus loss), not keystrokes.
                 foreach (var raw in src.Params.Values.Concat(src.Filters.Values)
                              .Append(src.Baq ?? src.Query ?? ""))
                 {
@@ -2468,8 +2544,6 @@ public sealed class MainForm : Form
                     string rf = raw[1..^1];
                     if (string.IsNullOrWhiteSpace(Val(raw)))
                         throw new InvalidOperationException($"waiting for {rf}");
-                    if (focusedPrompts.Contains(rf))
-                        throw new InvalidOperationException($"waiting for {rf} (still typing)");
                 }
                 var conns = ConnectionsStore.Load(ConnectionsPath);
                 var conn = conns.FirstOrDefault(c =>
@@ -2482,8 +2556,8 @@ public sealed class MainForm : Form
                 if (!isEpicor && !isGlpi)
                     throw new InvalidOperationException(
                         $"connection '{conn.Name}' is type '{conn.Type}' — etiq:query needs an epicor or glpi connection");
-                if (_sourceFails.TryGetValue(sig, out var prevFail))
-                    throw new InvalidOperationException(prevFail);   // no auto-retry storm
+                if (_sources.IsFailed(sig, out var prevFail))
+                    throw new InvalidOperationException(prevFail);   // same generation: no retry storm
                 string? ds = src.Dataset ?? ActiveDataset;
                 try
                 {
@@ -2514,11 +2588,10 @@ public sealed class MainForm : Form
                 }
                 catch (Exception ex)
                 {
-                    _sourceFails[sig] = ex.Message;
+                    _sources.Fail(sig, ex.Message);
                     throw;
                 }
-                _sourceRows[sig] = row;
-                if (_sourceRows.Count > 64) _sourceRows.Clear(); _sourceFails.Clear();   // crude cap
+                _sources.Store(sig, row);
             }
             if (!row.TryGetValue(column, out var v)) return null;
             return v.ValueKind == System.Text.Json.JsonValueKind.String
@@ -2536,14 +2609,12 @@ public sealed class MainForm : Form
         var tmpl = _doc is not null && (_doc.Xml.Descendants(EtiqTemplate.Ns + "query").Any() ||
                                         _doc.Xml.Descendants(EtiqTemplate.Ns + "source").Any())
             ? EtiqTemplate.Parse(_doc.Xml.ToString()) : null;
-        // captured HERE: Control.Focused must be read on the UI thread, and
-        // the resolve may run on a background task
-        var focused = _promptBoxes.Where(kv => kv.Value.Focused)
-            .Select(kv => kv.Key).ToHashSet();
         ResolveContext ctx = null!;
         ctx = new ResolveContext
         {
-            PromptValues = _promptBoxes.ToDictionary(kv => kv.Key, kv => kv.Value.Text),
+            // fetch-feeding prompts contribute their COMMITTED value
+            PromptValues = _promptBoxes.ToDictionary(kv => kv.Key,
+                kv => _committed.TryGetValue(kv.Key, out var c) ? c : kv.Value.Text),
             ListSelections = listOverride ?? CurrentListSelections(),
             // snapshot: the resolve may run on a background task while a
             // fetch completion replaces a list's rows on the UI thread
@@ -2557,148 +2628,109 @@ public sealed class MainForm : Form
             Rest = (_, _, _) => null,
             // the lambda runs after ctx is assigned — safe self-reference
             SourceColumn = tmpl is null || !remote ? null
-                : (src, col) => FetchSourceColumn(tmpl, ctx, focused, src, col),
+                : (src, col) => FetchSourceColumn(tmpl, ctx, src, col),
             Substitutes = substitutes,
         };
         return ctx;
     }
 
-    /// <summary>Second, DISPLAY-ONLY resolve with sensitive fields replaced
-    /// by their stand-ins (View → Redact Sensitive). Remote columns come
-    /// from the same per-source cache the real resolve just filled, so this
-    /// costs no extra fetch. Null when redaction is off or it fails — the
-    /// canvas then falls back to the real values.</summary>
-    private IReadOnlyDictionary<string, string>? RedactedDisplay(EtiqTemplate template, ResolveContext realCtx)
-    {
-        if (!UnitPrefs.Redact || _doc is null) return null;
-        var subs = Redaction.Substitutes(_doc.Root);
-        if (subs.Count == 0) return null;
-        try
-        {
-            var ctx = new ResolveContext
-            {
-                PromptValues = realCtx.PromptValues, ListSelections = realCtx.ListSelections,
-                ListRows = realCtx.ListRows, Counters = realCtx.Counters, EpicorColumn = realCtx.EpicorColumn,
-                Rest = realCtx.Rest, SourceColumn = realCtx.SourceColumn, Substitutes = subs,
-            };
-            return new FieldResolver(template, ctx).ResolveAll();
-        }
-        catch (ResolveException) { return null; }
-    }
-
     private bool _previewBusy, _previewAgain;
 
-    /// <summary>Background preview resolve: remote source fetches must
-    /// never block the UI thread (connection setup alone can take seconds
-    /// — the app looked FROZEN). One resolve in flight at a time; a
-    /// request arriving mid-flight runs once more at the end.</summary>
-    private async Task RefreshPreviewAsync(EtiqTemplate template)
+    /// <summary>THE snapshot producer (docs/data-flow.md §2): builds the
+    /// contexts on the UI thread (they read controls), resolves every field
+    /// on its own on a background task (remote fetches must never freeze
+    /// the UI), swaps the snapshot in whole, repaints, lists the errors.
+    /// One in flight at a time; a request arriving mid-flight runs once
+    /// more at the end. Returns true when the label is PRINTABLE: a fresh
+    /// snapshot with no error on any bound field.</summary>
+    private async Task<bool> RefreshPreviewAsync(EtiqTemplate template)
     {
-        if (_previewBusy) { _previewAgain = true; return; }
+        if (_previewBusy) { _previewAgain = true; return false; }
+        if (_canvas.Mode != EditorMode.Data) return false;   // Design never resolves
         _previewBusy = true;
         try
         {
-            var ctx = BuildResolveContext();   // reads controls: UI thread
+            var plain = BuildResolveContext();
+            var standIns = UnitPrefs.Redact && _doc is not null ? Redaction.Substitutes(_doc.Root) : null;
+            var redact = standIns is { Count: > 0 } ? BuildResolveContext(substitutes: standIns) : null;
+            int gen = _sources.Generation;
             bool remote = template.Sources.Count > 0;
             if (remote && _dataStatus is not null)
             {
                 _dataStatus.ForeColor = SystemColors.GrayText;
                 _dataStatus.Text = "Resolving…";
             }
-            // expected failures come back as a VALUE, not an exception —
-            // a ResolveException crossing the Task boundary made VS's
-            // Just-My-Code debugger break as "user-unhandled" even though
-            // it was caught
-            var (resolved, err) = await Task.Run(() =>
-            {
-                try
-                {
-                    return (new FieldResolver(template, ctx).ResolveAll(), (string?)null);
-                }
-                catch (ResolveException ex)
-                {
-                    return ((Dictionary<string, string>?)null, ex.Message);
-                }
-            });
-            // pickers rebuild BEFORE the success check: an empty query-fed
-            // list makes every resolve fail ("no row selected"), and if that
-            // failure skipped the rebuild the picker could never recover
-            // when its inputs changed (class switched away from an empty one)
-            foreach (var l in template.Lists)
-                if (_listCombos.TryGetValue(l.Name, out var cb) &&
-                    ListNeedsRebuild(template, l, resolved ?? new Dictionary<string, string>()))
-                    RebuildListItems(template, l, cb);
-            if (resolved is null)
-            {
-                if (_dataStatus is not null)
-                {
-                    _dataStatus.ForeColor = Color.Firebrick;
-                    _dataStatus.Text = WithListNotes(err ?? "");
-                }
-                return;
-            }
-            _canvas.ResolvedValues = resolved;
-            _canvas.DisplayValues = RedactedDisplay(template, ctx);
+            var snap = await Task.Run(() => Preview.Produce(template,
+                subs => subs is null ? plain : redact!, standIns, gen));
+            if (_canvas.Mode != EditorMode.Data) return false;   // mode changed mid-resolve
+
+            _canvas.Snapshot = snap;
             _canvas.Invalidate();
-            var sensitive = UnitPrefs.Redact && _doc is not null
-                ? Redaction.AllSensitiveFields(_doc.Root) : new HashSet<string>();
+            // which INPUTS to outline: a prompt box whose field errored; a
+            // picker any of whose list-fed fields errored
+            _erroredInputs.Clear();
+            foreach (var (name, box) in _promptBoxes)
+                if (snap.Errors.ContainsKey(name)) _erroredInputs.Add(box);
+            foreach (var (listName, cb) in _listCombos)
+                if (template.Fields.Any(f => f.Source == "list" && f.ListRef == listName && snap.Errors.ContainsKey(f.Name)))
+                    _erroredInputs.Add(cb);
+            _dataPanel.Invalidate();
+            // pickers rebuild from whatever resolved (an empty query-fed list
+            // must be able to recover when its inputs change)
+            var values = new Dictionary<string, string>(snap.Values);
+            foreach (var l in template.Lists)
+                if (_listCombos.TryGetValue(l.Name, out var cb) && ListNeedsRebuild(template, l, values))
+                    RebuildListItems(template, l, cb);
+            // override= boxes: ghost text is the FETCHED value only — never the
+            // operator's own entry echoed back
             foreach (var f in template.Fields)
                 if (f.Source is ("epicor" or "rest") && f.Override &&
-                    _promptBoxes.TryGetValue(f.Name, out var box) &&
-                    resolved.TryGetValue(f.Name, out var rv))
-                    box.PlaceholderText = rv == "" ? "(from source)" : sensitive.Contains(f.Name) ? "•••••" : rv;
+                    _promptBoxes.TryGetValue(f.Name, out var box) && box.Text == "")
+                    box.PlaceholderText = !snap.Values.TryGetValue(f.Name, out var rv) || rv == "" ? "(from source)"
+                        : standIns is not null && standIns.ContainsKey(f.Name) ? "•••••" : rv;
             if (_dataStatus is not null)
             {
-                _dataStatus.ForeColor = SystemColors.GrayText;
-                _dataStatus.Text = $"Preview OK — {resolved.Count} field(s) resolved.";
+                if (snap.HasErrors)
+                {
+                    // source failures first, then the rest, one per line
+                    var lines = snap.Errors
+                        .OrderBy(e => e.Value.Contains("fetch", StringComparison.OrdinalIgnoreCase) ||
+                                      e.Value.Contains("waiting", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                        .ThenBy(e => e.Key, StringComparer.Ordinal)
+                        .Select(e => $"{e.Key}: {e.Value}");
+                    _dataStatus.ForeColor = Color.Firebrick;
+                    _dataStatus.Text = WithListNotes(string.Join("\n", lines));
+                }
+                else
+                {
+                    _dataStatus.ForeColor = SystemColors.GrayText;
+                    _dataStatus.Text = $"Preview OK — {snap.Values.Count} field(s) resolved.";
+                }
             }
+            return !BoundFields().Any(snap.Errors.ContainsKey);
         }
         finally
         {
             _previewBusy = false;
-            if (_previewAgain) { _previewAgain = false; _previewTimer?.Start(); }
+            if (_previewAgain) { _previewAgain = false; _ = RefreshPreviewAsync(template); }
         }
     }
 
-    /// <summary>Resolve into the canvas preview. Errors show on the inline
-    /// status line. SYNCHRONOUS — used by the PRINT path, where blocking
-    /// until the data is in hand is exactly right. Returns success.</summary>
-    private bool RefreshPreview(EtiqTemplate template)
+    /// <summary>For the print path: wait out a recompute already in flight
+    /// (the Leave-commit that a Print click just triggered), then run one
+    /// of our own so the answer is about the CURRENT inputs.</summary>
+    private async Task<bool> FreshPreviewAsync(EtiqTemplate template)
     {
-        try
-        {
-            var ctx = BuildResolveContext();
-            var resolved = new FieldResolver(template, ctx).ResolveAll();
-            _canvas.ResolvedValues = resolved;
-            _canvas.DisplayValues = RedactedDisplay(template, ctx);
-            _canvas.Invalidate();
-            // re-filter pickers whose filter-ref value changed with this edit
-            foreach (var l in template.Lists)
-                if (_listCombos.TryGetValue(l.Name, out var cb) && ListNeedsRebuild(template, l, resolved))
-                    RebuildListItems(template, l, cb);
-            if (_dataStatus is not null)
-            {
-                _dataStatus.ForeColor = SystemColors.GrayText;
-                _dataStatus.Text = $"Preview OK — {resolved.Count} field(s) resolved.";
-            }
-            return true;
-        }
-        catch (ResolveException ex)
-        {
-            // same rule as the async path: pickers must be able to recover
-            // from a failing resolve, or an empty list is a dead end
-            foreach (var l in template.Lists)
-                if (_listCombos.TryGetValue(l.Name, out var cb) &&
-                    ListNeedsRebuild(template, l, new Dictionary<string, string>()))
-                    RebuildListItems(template, l, cb);
-            if (_dataStatus is not null)
-            {
-                _dataStatus.ForeColor = Color.Firebrick;
-                _dataStatus.Text = WithListNotes(ex.Message);
-            }
-            return false;
-        }
+        while (_previewBusy) await Task.Delay(25);
+        return await RefreshPreviewAsync(template);
     }
+
+    /// <summary>Fields some element of the document is bound to — the ones
+    /// whose errors block printing.</summary>
+    private IEnumerable<string> BoundFields() =>
+        _doc is null ? Enumerable.Empty<string>()
+        : _doc.Xml.Descendants().Select(e => (string?)e.Attribute("data-field"))
+              .Where(f => !string.IsNullOrEmpty(f)).Select(f => f!).Distinct();
 
     /// <summary>One label per row of the list; other lists/prompts keep the
     /// panel's current values. Rows that fail to resolve are reported and

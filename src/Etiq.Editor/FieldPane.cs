@@ -29,7 +29,10 @@ public sealed class FieldPane : UserControl
         new("caption", "Caption", Kind.Text, new[] { "prompt", "epicor", "rest", "list" },
             "Data-panel label shown to the operator"),
         new("default", "Default", Kind.Text, new[] { "prompt" },
-            "Prefills the input; Clear restores it"),
+            "Prefills the input; Clear restores it (unless On Clear = blank)"),
+        new("clear",   "On Clear", Kind.Combo, new[] { "prompt" },
+            "What the data panel's Clear button does to this box: restore the default (empty when none) or always blank",
+            Choices: new[] { "", "default", "blank" }),
         new("value",   "Value",   Kind.Text, new[] { "fixed", "auto" },
             "Fixed value, or auto pattern e.g. date:dd-MMM-yyyy"),
 

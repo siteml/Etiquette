@@ -37,6 +37,11 @@ At print time the engine replaces the element's text content with the value
 of `PartNo`. The literal content in the file is just the design-time preview.
 
 Optional:
+- `data-clear="blank"` — editor-only, on a data-bound element: after the
+  data panel's Clear the element draws EMPTY until the operator's next
+  entry, even when its field still resolves (a compose of prompt defaults,
+  say). Print is never affected. Field-level counterpart: a prompt field's
+  `clear="blank"` empties its own box instead of restoring `default=`.
 - `data-sensitive="true"` or `data-sensitive="STAND-IN TEXT"` — editor-only
   screen redaction (remote demos) for a STATIC element: while the
   designer's Redact Sensitive mode is on, the element shows its stand-in —
@@ -225,7 +230,12 @@ Source kinds:
   predates this and stays a first-class kind; it may become a built-in
   `rest` profile internally. `on-fail` applies to `rest` exactly as to
   `epicor`.
-- `prompt` — operator input at print time (caption, mask, default)
+- `prompt` — operator input at print time (caption, mask, default).
+  `clear="default|blank"` says what the data panel's Clear button does to
+  the box: `default` (absent) restores `default=` (empty when there is
+  none); `blank` always empties it, even with a default. A cleared box has
+  nothing to redact; a restored default marked `sensitive` is redacted the
+  moment it lands.
 
 Any non-compose field may additionally carry
 `case="normal|upper|lower|title"`: the resolved value is normalized before

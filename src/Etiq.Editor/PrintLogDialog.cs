@@ -11,7 +11,8 @@ namespace Etiq.Editor;
 /// limit — the monthly files keep everything.
 /// Reprint replays the selected row's logged values through the caller's
 /// print path — the same verbatim-replay contract the series manifest
-/// will use.
+/// will use — with its own copy count (default 1: a reprint is rarely
+/// the original run's quantity; the Copies column shows what that was).
 /// </summary>
 public sealed class PrintLogDialog : Form
 {
@@ -19,12 +20,14 @@ public sealed class PrintLogDialog : Form
     private readonly NumericUpDown _backN = new() { Minimum = 1, Maximum = 999, Width = 60 };
     private readonly ComboBox _backUnit = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90 };
     private readonly Button _reprint = new() { Text = "Reprint", Width = 90, Enabled = false };
+    private readonly NumericUpDown _copies = new() { Minimum = 1, Maximum = 999, Value = 1, Width = 56 };
     private readonly Label _status = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
-    private readonly Action<Dictionary<string, string>>? _reprintAction;
+    private readonly Action<Dictionary<string, string>, int>? _reprintAction;
     private readonly List<Dictionary<string, string>?> _rowValues = new();
 
-    /// <summary>reprint: null hides the button (log is view-only).</summary>
-    public PrintLogDialog(IWin32Window? owner, Action<Dictionary<string, string>>? reprint)
+    /// <summary>reprint(values, copies): null hides the button (log is
+    /// view-only).</summary>
+    public PrintLogDialog(IWin32Window? owner, Action<Dictionary<string, string>, int>? reprint)
     {
         _reprintAction = reprint;
         Text = "Print Log";
@@ -52,10 +55,12 @@ public sealed class PrintLogDialog : Form
         _grid.Columns.Add("template", "Template");
         _grid.Columns.Add("printer", "Printer");
         _grid.Columns.Add("page", "Page");
+        _grid.Columns.Add("copies", "Copies");
         _grid.Columns.Add("result", "Result");
         _grid.Columns.Add("values", "Values");
         _grid.Columns["time"]!.FillWeight = 80; _grid.Columns["template"]!.FillWeight = 70;
         _grid.Columns["printer"]!.FillWeight = 80; _grid.Columns["page"]!.FillWeight = 30;
+        _grid.Columns["copies"]!.FillWeight = 30;
         _grid.Columns["result"]!.FillWeight = 45; _grid.Columns["values"]!.FillWeight = 220;
         _grid.SelectionChanged += (_, _) => _reprint.Enabled =
             _reprintAction is not null && CurrentValues() is not null;
@@ -66,8 +71,12 @@ public sealed class PrintLogDialog : Form
         bottom.Controls.Add(close);
         if (_reprintAction is not null)
         {
-            _reprint.Click += (_, _) => { if (CurrentValues() is { } v) _reprintAction(v); };
+            _reprint.Click += (_, _) => { if (CurrentValues() is { } v) _reprintAction(v, (int)_copies.Value); };
+            // right-to-left flow: Close | Reprint | [copies] Copies
             bottom.Controls.Add(_reprint);
+            _copies.Margin = new Padding(0, 4, 8, 0);
+            bottom.Controls.Add(_copies);
+            bottom.Controls.Add(new Label { Text = "Copies", AutoSize = true, Margin = new Padding(0, 9, 4, 0) });
         }
         CancelButton = close;
 
@@ -127,6 +136,7 @@ public sealed class PrintLogDialog : Form
             string when = DateTimeOffset.TryParse(Str(e, "ts"), out var ts) ? ts.ToString("yyyy-MM-dd HH:mm:ss") : Str(e, "ts");
             string pageTxt = Str(e, "page") is { Length: > 0 } pg ? $"{pg}/{Str(e, "pages")}" : "";
             _grid.Rows.Add(when, Str(e, "template"), Str(e, "printer"), pageTxt,
+                           Str(e, "copies") is { Length: > 0 } cp ? cp : "1",
                            fate.GetValueOrDefault(job, "spooled"), valText);
             _rowValues.Add(vals);
         }

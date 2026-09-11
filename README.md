@@ -26,7 +26,7 @@ apart:
   merge data into the template, generate barcodes, print via any Windows
   printer driver — plus a ZPL raster path for thermal printers.
 
-## What it does today (v0.10)
+## What it does today (v0.11)
 
 - **Barcodes, dependency-free:** Code 128, GS1-128, Code 39 (+extended),
   ITF-14, QR (versions 1–40, all ECC levels), rMQR, Aztec, DataMatrix

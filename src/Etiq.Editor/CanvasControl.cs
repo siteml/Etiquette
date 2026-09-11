@@ -17,7 +17,7 @@ public enum EditorMode { Design, Data }
 /// to other objects' edges/centers and the label bounds (magenta guides).
 ///
 /// Design mode: full editing. Data mode: read-only preview; when
-/// ResolvedValues is set, dynamic content renders resolved.
+/// a Snapshot is in view, dynamic content renders from it.
 /// </summary>
 public sealed class CanvasControl : Control
 {
@@ -29,12 +29,20 @@ public sealed class CanvasControl : Control
     public EditorMode Mode { get; set; } = EditorMode.Design;
     public double Zoom { get; private set; } = 0.15;
     public PointF Pan { get; private set; } = new(20, 20);
-    public IReadOnlyDictionary<string, string>? ResolvedValues { get; set; }
-    /// <summary>Redacted twin of ResolvedValues for DRAWING while View →
-    /// Redact Sensitive is on (sensitive fields resolved to stand-ins, so
-    /// composes show only their public parts). Print always uses
-    /// ResolvedValues; this never leaves the canvas.</summary>
-    public IReadOnlyDictionary<string, string>? DisplayValues { get; set; }
+    /// <summary>The ONE source of data values on the canvas (docs/data-flow.md
+    /// §2–3): replaced whole by the host, never edited. Bound elements read
+    /// it in Data mode, or in Design mode while ShowDataValues is on; an
+    /// errored / absent field draws EMPTY, never the design text.</summary>
+    public PreviewSnapshot Snapshot { get; set; } = PreviewSnapshot.Empty;
+    /// <summary>Design-mode toggle: show the snapshot's values instead of
+    /// the design text. Meaningless (host greys it) until a snapshot exists.</summary>
+    public bool ShowDataValues { get; set; }
+    public bool HasSnapshot => !ReferenceEquals(Snapshot, PreviewSnapshot.Empty);
+    private bool DataView => Mode == EditorMode.Data || (ShowDataValues && HasSnapshot);
+    /// <summary>The data panel is in its just-Cleared state: bound elements
+    /// marked data-clear="blank" draw empty regardless of what their field
+    /// resolves to. The host clears this on the operator's first entry.</summary>
+    public bool Cleared { get; set; }
 
     private readonly List<EditorObject> _sel = new();
     public IReadOnlyList<EditorObject> Selection => _sel;
@@ -62,6 +70,14 @@ public sealed class CanvasControl : Control
     private int _gesture;                       // undo merge-key generation
     private PointD _marqueeEndW;
     private List<SnapGuide> _guides = new();
+    /// <summary>What the current drag snapped to, for the hint drawn by the
+    /// cursor ("Text: {Part} left · label center", "grid 0.1 in, 0.25 in").
+    /// Null = nothing snapped / not dragging.</summary>
+    private string? _snapHint;
+    private Point _snapHintAt;
+    /// <summary>Names an object for the snap hint (the host lends the
+    /// outline's caption); null = kind only.</summary>
+    public Func<EditorObject, string>? Captioner { get; set; }
 
     // rulers + operator guides (docs/grid-guides.md pass 3)
     public const int RulerPx = 22;
@@ -158,6 +174,70 @@ public sealed class CanvasControl : Control
     private List<RectD> OthersWorldBounds(bool includeSelected = false) => _doc!.Objects
         .Where(o => (includeSelected || !InSelection(o)) && o.Layer?.Visible != false)
         .Select(o => o.WorldBounds(_measurer)).ToList();
+
+    /// <summary>Attribute each active snap guide to what produced it —
+    /// an operator guide, the label's edge/center, or a stationary object's
+    /// edge/center (named through Captioner) — and, with no magnetic snap,
+    /// say where the grid put the point. `landed` = the snapped world
+    /// position of what is being dragged (top-left / handle / endpoint).</summary>
+    private void SetSnapHint(bool noSnap, PointD landed, Point screen)
+    {
+        _snapHintAt = screen;
+        if (noSnap || _doc is null) { _snapHint = null; return; }
+        var parts = new List<string>();
+        foreach (var gd in _guides)
+        {
+            string? what = null;
+            // operator guides: by NAME when the guide has one (several guides
+            // can sit near each other — the label is what tells them apart),
+            // position as the fallback
+            var opGuide = GuidesOn && _doc.View.SnapGuides
+                ? _doc.View.Guides.FirstOrDefault(og => og.Vertical == gd.Vertical && Same(og.Pos, gd.Pos))
+                : null;
+            if (opGuide is not null)
+                what = string.IsNullOrWhiteSpace(opGuide.Name)
+                    ? $"guide {UnitPrefs.FS(gd.Pos)}"
+                    : $"guide \"{opGuide.Name}\" ({UnitPrefs.FS(gd.Pos)})";
+            else if (SnapObjects && EdgeName(_doc.ViewBox, gd) is { } le)
+                what = $"label {le}";
+            else if (SnapObjects)
+                foreach (var o in _doc.Objects)
+                {
+                    if (InSelection(o) || o.Layer?.Visible == false) continue;
+                    if (EdgeName(o.WorldBounds(_measurer), gd) is { } en)
+                    {
+                        what = $"{Captioner?.Invoke(o) ?? o.Kind.ToString()} {en}";
+                        break;
+                    }
+                }
+            parts.Add((gd.Vertical ? "↔ " : "↕ ") + (what ?? UnitPrefs.FS(gd.Pos)));
+        }
+        if (parts.Count == 0 && _doc.GridMils > 0 && _doc.View.SnapGrid)
+            parts.Add($"grid {UnitPrefs.FS(landed.X)}, {UnitPrefs.FS(landed.Y)}");
+        _snapHint = parts.Count == 0 ? null : string.Join("  ·  ", parts);
+
+        static bool Same(double a, double b) => Math.Abs(a - b) < 1e-6;
+        static string? EdgeName(RectD r, SnapGuide gd) => gd.Vertical
+            ? Same(r.X, gd.Pos) ? "left" : Same(r.X + r.W / 2, gd.Pos) ? "center" : Same(r.Right, gd.Pos) ? "right" : null
+            : Same(r.Y, gd.Pos) ? "top" : Same(r.Y + r.H / 2, gd.Pos) ? "middle" : Same(r.Bottom, gd.Pos) ? "bottom" : null;
+    }
+
+    /// <summary>Tooltip-style hint beside the cursor, screen space; kept
+    /// inside the control so it never clips at the right/bottom edge.</summary>
+    private void DrawSnapHint(Graphics g, string hint, Point at)
+    {
+        var font = Font;
+        var size = g.MeasureString(hint, font);
+        var rect = new RectangleF(at.X + 16, at.Y + 18, size.Width + 8, size.Height + 4);
+        if (rect.Right > ClientSize.Width) rect.X = Math.Max(0, at.X - 16 - rect.Width);
+        if (rect.Bottom > ClientSize.Height) rect.Y = Math.Max(0, at.Y - 8 - rect.Height);
+        using var bg = new SolidBrush(SystemColors.Info);
+        using var fg = new SolidBrush(SystemColors.InfoText);
+        using var edge = new Pen(SystemColors.ControlDark);
+        g.FillRectangle(bg, rect);
+        g.DrawRectangle(edge, rect.X, rect.Y, rect.Width, rect.Height);
+        g.DrawString(hint, font, fg, rect.X + 4, rect.Y + 2);
+    }
 
     // ---------- painting ----------
 
@@ -327,6 +407,8 @@ public sealed class CanvasControl : Control
         g.Restore(state);
 
         if (GuidesOn) DrawGuides(g);
+        if (Mode == EditorMode.Design && _dragging && _snapHint is { Length: > 0 } hint)
+            DrawSnapHint(g, hint, _snapHintAt);
 
         if (Mode == EditorMode.Design)
         {
@@ -660,7 +742,9 @@ public sealed class CanvasControl : Control
                     ?? (string?)o.El.Attribute("data-field")
                     ?? "SAMPLE";
                 string content = Shown(o, ResolvedContent(o) ?? sample, sample);
-                bool drawn = LabelRenderer.DrawBarcode(g, b, sym, content,
+                // empty in a data view = nothing to encode: draw nothing (the
+                // hatch means "symbology not drawable", not "no data")
+                bool drawn = content == "" || LabelRenderer.DrawBarcode(g, b, sym, content,
                     (string?)o.El.Attribute("data-ecc"),
                     (int)o.GetNum("data-columns", 0),
                     (string?)o.El.Attribute("data-logo"),
@@ -719,13 +803,19 @@ public sealed class CanvasControl : Control
         return Redaction.IsSensitive(o.El, _sensitiveFields) ? Redaction.Display(o.El, placeholder) : real;
     }
 
+    /// <summary>What a bound element draws from the snapshot: null = not in
+    /// a data view (caller falls back to design text); "" = in a data view
+    /// with no value (error / not resolved / cleared) — drawn as nothing.</summary>
     private string? ResolvedContent(EditorObject o)
     {
-        var src = UnitPrefs.Redact && DisplayValues is not null ? DisplayValues : ResolvedValues;
-        if (src is null) return null;
+        if (!DataView) return null;
         string? field = (string?)o.El.Attribute("data-field");
-        return field is not null && src.TryGetValue(field, out var v) ? v : null;
+        if (field is null) return null;
+        if (Cleared && (string?)o.El.Attribute("data-clear") == "blank") return "";
+        return Snapshot.Display(field, UnitPrefs.Redact) ?? "";
     }
+
+
 
     private void DrawSelection(Graphics g, EditorObject o, bool primary)
     {
@@ -1377,6 +1467,7 @@ public sealed class CanvasControl : Control
                     6 / Zoom, true, true, GuideXs(), GuideYs());
                 p = Redot(sp); _guides = guides;
             }
+            SetSnapHint(noSnap, p, e.Location);
             _doc.Undo.Push(Selected.SetLineEndpoint(le, p));
             Invalidate();
             return;
@@ -1401,6 +1492,7 @@ public sealed class CanvasControl : Control
                     6 / Zoom, sx, sy, GuideXs(), GuideYs());
                 snapped = Redot(sp); _guides = guides;
             }
+            SetSnapHint(noSnap, snapped, e.Location);
             _doc.Undo.Push(s.Resize(
                 Geometry.ResizeBy(s.Bounds(_measurer), h, snapped, min: 10), _measurer));
             Invalidate();
@@ -1434,6 +1526,7 @@ public sealed class CanvasControl : Control
         {
             _guides = new();
         }
+        SetSnapHint(noSnap, new PointD(_dragOrigBounds.X + totalX, _dragOrigBounds.Y + totalY), e.Location);
 
         double incX = totalX - _appliedDx, incY = totalY - _appliedDy;
         if (incX != 0 || incY != 0)
@@ -1479,6 +1572,7 @@ public sealed class CanvasControl : Control
         _dragging = false; _dragPending = false; _panning = false; _marquee = false; _dragHandle = null;
         _lineEnd = null;
         _guides = new();
+        _snapHint = null;
         Capture = false;
         Invalidate();
     }

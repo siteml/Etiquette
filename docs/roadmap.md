@@ -1,9 +1,25 @@
 # Roadmap
 
-Where Etiquette is and where it's going. Current release: **v0.10.2**
+Where Etiquette is and where it's going. Current release: **v0.11.0**
 (see the Releases page; `etiqedit` checks it via Help → Check for Updates).
 
 Legend: `[x]` done · `[~]` partially done · `[ ]` not started.
+
+## Shipped — v0.11.0
+
+- [x] **Data flow rebuilt** (`docs/data-flow.md`) — one tracked snapshot
+      is all the canvas reads; per-field resolve (a `required` prompt
+      left empty errors alone — required for *printing*, not display);
+      fetch-feeding prompts commit on Tab / Enter / focus loss; failed
+      lookups retry on the next commit; red outline on the erroring data-
+      panel input, errors listed in the status line; Clear is one ordinary
+      recompute; View → Show Data Values in Design mode.
+- [x] **Clear behavior per field and per element** — `clear="blank"` on a
+      prompt, `data-clear="blank"` on a bound element.
+- [x] **Snap hint** — what the drag snapped to, guides by name.
+- [x] **Print log: Reprint copies**; copies logged as a field, never rows.
+- [x] **Update dialog** rolls up every release between the running
+      version and the offered one.
 
 ## Shipped — v0.10.0
 
@@ -167,6 +183,11 @@ The suite is usable end to end for the design → data → print loop:
 - [ ] Connections editor; Epicor context for printing from the editor
 - [ ] "Merge line stack" inverse; live compose preview
 - [ ] `tspan` export; production counter store
+- [ ] **Print log / reprint, phase 2** — multi-select reprint; a
+      reprint dialog for series-bound and list/data-bound sets (reprint a
+      serial range, not one row) once series lands and groups a run in one
+      entry; a "full record" view for rows whose values are cut off in
+      the grid.
 
 ## Legacy `.btw` import
 

@@ -173,6 +173,7 @@ public static class UpdateDialogs
         };
         sheetOrient.Items.AddRange(new object[] { "match the label (default)", "always portrait", "always landscape" });
         sheetOrient.SelectedIndex = UnitPrefs.SheetOrientation switch { "portrait" => 1, "landscape" => 2, _ => 0 };
+        // data panel behavior
         var tip = new ToolTip();
         tip.SetToolTip(gridMajor, "0 = automatic (10; 8 on a dot grid)");
         tip.SetToolTip(sheetOrient, "Office (sheet) printers only — label printers always print the label's own orientation");
@@ -231,7 +232,8 @@ public static class UpdateDialogs
         var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 334, Top = 340, Width = 80 };
         f.Controls.AddRange(new Control[]
             { auto, flavorLbl, flavor, skipLbl, clear, recentLbl, recentNum, unitsLbl, units,
-              offLbl, offPrinter, offX, offXl, offY, offYl, gridLbl, gridPx, majorLbl, gridMajor, majorMode, sheetLbl, sheetOrient, ok, cancel });
+              offLbl, offPrinter, offX, offXl, offY, offYl, gridLbl, gridPx, majorLbl, gridMajor, majorMode, sheetLbl, sheetOrient,
+              ok, cancel });
         f.AcceptButton = ok;
         f.CancelButton = cancel;
         if (f.ShowDialog(owner) == DialogResult.OK)

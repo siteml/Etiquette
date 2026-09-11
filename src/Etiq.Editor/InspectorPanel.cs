@@ -332,6 +332,7 @@ public sealed class InspectorPanel : UserControl
             if (t is not null) Push(O.SetText(t));
         });
         AddSensitive();
+        AddClearBlank();
         AddCombo("Font", InstalledFonts(), () => O.FontFamily,
             v => SetAttr(O, "font-family", v == "" ? null : v, "set font"), editable: true);
         AddPt("Font size", () => O.GetNum("font-size", 12),
@@ -385,6 +386,7 @@ public sealed class InspectorPanel : UserControl
         AddLen("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
 
         AddSensitive();
+        AddClearBlank();
         AddHeader("Barcode");
         AddCombo("Symbology", Etiq.Core.EtiqTemplate.Symbologies,
             () => (string?)O.El.Attribute("data-barcode") ?? "",
@@ -901,6 +903,19 @@ public sealed class InspectorPanel : UserControl
             step: Units.MilsPerPt, allowEmpty: allowEmpty, hint: hint,
             fmt: Units.FormatPoints,
             parse: t => Units.TryParsePoints(t, out double m) ? m : null);
+    }
+
+    /// <summary>Element-level Clear behavior (docs/convention.md
+    /// `data-clear`): a data-bound element that draws EMPTY while the data
+    /// panel is in its cleared state, even when its field (a compose of
+    /// prompt defaults, say) still resolves to something. Lifted by the
+    /// operator's first entry. Only offered on bound elements.</summary>
+    private void AddClearBlank()
+    {
+        if (O.El.Attribute("data-field") is null) return;
+        AddCheck("Blank on Clear", () => (string?)O.El.Attribute("data-clear") == "blank",
+            v => Push(O.SetAttr("data-clear", v ? "blank" : null, "blank on clear")),
+            hint: "After the data panel's Clear this element shows nothing until the operator enters data — for composes that would otherwise show their defaults");
     }
 
     /// <summary>Screen redaction mark (docs/convention.md `data-sensitive`):

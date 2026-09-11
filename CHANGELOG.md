@@ -4,6 +4,66 @@ All notable changes to Etiquette are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver
 (pre-1.0: minor bumps may change behavior).
 
+## [0.11.0] — 2026-09-11
+
+### Changed
+- **Preview data flow rebuilt** (`docs/data-flow.md`). One tracked state —
+  the *snapshot* — is the only thing the canvas reads: every declared
+  field resolves **on its own** to a value or an error, so a `required`
+  prompt left empty (required for *printing*) no longer hides the rest
+  of the label. Bound elements with an error draw empty; the data-panel
+  input whose field errored gets a thin red outline, and the status line
+  lists every error, source failures first. A prompt that feeds a remote lookup contributes its
+  **committed** value (Tab / Enter / focus loss / Clear) — the lookup
+  runs once per committed key, the label never shows a half-typed key,
+  and re-committing retries a failed lookup instead of remembering it as
+  invalid. The 350 ms debounce, the "still typing" focus gate and the
+  sticky failure cache are gone; every other change resolves on the spot.
+- **View → Show Data Values** (Design mode) shows the last snapshot's
+  values instead of the design text — a view, not an editor. Data mode
+  never shows design text on a bound element. Replaces the "keep pulled
+  data" option.
+- **Clear** is one ordinary recompute after resetting the inputs: prompts
+  back to their default (or blank per `clear="blank"`), pick lists to
+  their default row, embedded Copies to 1, pulled rows dropped. Composes
+  keep their literal and prompt parts and lose only what came from a
+  source; auto fields (date) stay; nothing shows design-time sample text.
+- `override=` boxes: the ghost text is the fetched value only, never the
+  operator's own entry echoed back.
+
+### Added
+- **Print log: Reprint has its own Copies box** (default 1 — a reprint is
+  rarely the original quantity). The grid shows a Copies column from the
+  logged record. Reprint copies are expanded into pages by the editor and
+  logged as a `copies` field, never as extra rows; `PrintService.PrintBatch`
+  takes an optional `copies` for any caller on the direct path.
+- **Snap hint** — while dragging, moving a handle or a line endpoint, a
+  tooltip by the cursor names what the object snapped to: another
+  object's edge/center (captioned as in the outline), the label edge,
+  an operator guide by name (position as fallback), or the grid with
+  the landed coordinates. Alt (no snapping) shows nothing.
+- **Per-field Clear behavior** — `etiq:field … clear="blank"` (F4 →
+  Fields → On Clear) makes the data panel's Clear empty that box even
+  when it has a `default=`; absent/`default` restores the default as
+  before.
+- **Per-element Clear behavior** — `data-clear="blank"` (inspector →
+  "Blank on Clear", bound text and barcodes) draws that element empty
+  after Clear until the operator's next entry, even when its field (a
+  compose of prompt defaults) still resolves. Print is unaffected.
+
+### Fixed
+- Station "Print" with N copies logged N rows; it now logs one record
+  with a `copies` field (copies are still expanded into pages).
+- Pulled data no longer appears on the Design canvas after a click
+  (the old preview debounce outlived Data mode).
+- **Update dialog shows every release between yours and the offered
+  one.** The changelog is sliced to the sections newer than the running
+  version and no newer than the release being installed — a skipped
+  release's notes are the only warning about its behavior changes, so
+  none may be hidden — and `[Unreleased]` or anything past the offered
+  release (main ahead of the tag) is dropped. Unparseable file → shown
+  whole rather than empty.
+
 ## [0.10.2] — 2026-09-08
 
 ### Fixed

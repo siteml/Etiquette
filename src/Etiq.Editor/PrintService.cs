@@ -66,20 +66,32 @@ public static class PrintService
                                   ITextMeasurer measurer)
         => PrintBatch(owner, doc, pages, measurer, direct: false, printer: null);
 
-    /// <summary>direct=true skips the system print dialog entirely
-    /// (labelprint behavior — etiq:panel print="direct"): the job goes to
-    /// `printer` when named, else the machine default. Copies/collation
-    /// are expanded into PAGES by the caller, never left to the driver.</summary>
     /// <summary>What the last job actually asked the driver for — shown on
     /// the data-panel status line so paging surprises can be diagnosed.</summary>
     public static string? LastInfo { get; private set; }
 
+    /// <summary>direct=true skips the system print dialog entirely
+    /// (labelprint behavior — etiq:panel print="direct"): the job goes to
+    /// `printer` when named, else the machine default. `copies` repeats
+    /// the whole batch that many times (collated) — expanded into PAGES
+    /// here, never left to the driver, and logged as a copies FIELD on
+    /// each record, not as extra rows. A dialog print multiplies further
+    /// by whatever the user picks there.</summary>
     public static void PrintBatch(IWin32Window owner, EditorDoc doc,
                                   IReadOnlyList<IReadOnlyDictionary<string, string>?> pages,
-                                  ITextMeasurer measurer, bool direct, string? printer)
+                                  ITextMeasurer measurer, bool direct, string? printer,
+                                  int copies = 1)
     {
         LastInfo = null;
         if (pages.Count == 0) return;
+        var records = pages;   // the distinct labels, as logged — pages may be expanded
+        if (copies > 1)
+        {
+            var expanded = new List<IReadOnlyDictionary<string, string>?>(pages.Count * copies);
+            for (int c = 0; c < copies; c++) expanded.AddRange(pages);
+            pages = expanded;
+        }
+        else copies = 1;
         var vb = doc.ViewBox;
         if (vb.W <= 0 || vb.H <= 0)
         {
@@ -153,8 +165,6 @@ public static class PrintService
             e.HasMorePages = page < pages.Count;
         };
 
-        int copies = 1;   // dialog copies, expanded into pages (see below)
-        var records = pages;   // the distinct labels, as logged — pages may be expanded
         if (direct)
         {
             if (!string.IsNullOrWhiteSpace(printer))
@@ -184,17 +194,18 @@ public static class PrintService
             // each label repeated) and hand the driver a 1-copy job, so
             // every printer behaves the same. The LOG still gets one row per
             // distinct label (with a copies field), not one per physical copy.
-            copies = pd.PrinterSettings.Copies;
-            if (copies > 1)
+            int dlgCopies = pd.PrinterSettings.Copies;
+            if (dlgCopies > 1)
             {
-                var expanded = new List<IReadOnlyDictionary<string, string>?>(pages.Count * copies);
+                var expanded = new List<IReadOnlyDictionary<string, string>?>(pages.Count * dlgCopies);
                 if (pd.PrinterSettings.Collate)
-                    for (int c = 0; c < copies; c++) expanded.AddRange(pages);
+                    for (int c = 0; c < dlgCopies; c++) expanded.AddRange(pages);
                 else
                     foreach (var p in pages)
-                        for (int c = 0; c < copies; c++) expanded.Add(p);
+                        for (int c = 0; c < dlgCopies; c++) expanded.Add(p);
                 pages = expanded;   // captured by PrintPage — same variable
                 pd.PrinterSettings.Copies = 1;
+                copies *= dlgCopies;
             }
             // designed-for vs printing-at: the template may carry the head
             // density its dot grid was built on (etiq:view dots-per-mm); the

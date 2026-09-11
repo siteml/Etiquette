@@ -2738,6 +2738,214 @@ Check("editor: layer ops — move-to-layer (group units), reorder, remove", () =
     AssertEq(before, doc.Objects.Count, "and its contents");
 });
 
+// ---------- fields feeding remote sources (preview debounce policy) ----------
+
+Check("FieldsFeedingRemote: direct, through compose, through variant switch; nothing without sources", () =>
+{
+    var t = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:query name="Asset" connection="GLPI" query="{Kind}" filter-serial="{Key}"/>
+            <etiq:field name="Serial" source="prompt"/>
+            <etiq:field name="Site" source="prompt"/>
+            <etiq:field name="Kind" source="prompt"/>
+            <etiq:field name="Lot" source="prompt"/>
+            <etiq:field name="Key" source="compose">
+              <etiq:seg ref="Site"/><etiq:seg value="-"/><etiq:seg ref="Serial"/>
+            </etiq:field>
+            <etiq:field name="Title" source="compose">
+              <etiq:seg ref="Lot"/>
+            </etiq:field>
+            <etiq:field name="Name" source="epicor" from="Asset" column="name"/>
+          </etiq:label></metadata>
+          <text x="8" y="20" data-field="Name">n</text>
+        </svg>
+        """);
+    var fed = t.FieldsFeedingRemote();
+    foreach (var n in new[] { "Kind", "Key", "Site", "Serial" })
+        Assert(fed.Contains(n), $"{n} should feed the query");
+    foreach (var n in new[] { "Lot", "Title", "Name" })
+        Assert(!fed.Contains(n), $"{n} must not (only Lot's own compose reads it; Name is the OUTPUT)");
+
+    var none = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+            <etiq:field name="A" source="prompt"/>
+            <etiq:field name="B" source="compose"><etiq:seg ref="A"/></etiq:field>
+          </etiq:label></metadata>
+          <text x="8" y="20" data-field="B">b</text>
+        </svg>
+        """);
+    AssertEq(0, none.FieldsFeedingRemote().Count, "no sources → nothing debounced");
+});
+
+// ---------- preview snapshot (docs/data-flow.md) ----------
+
+const string SnapshotTemplate = """
+    <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+      <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <etiq:query name="Asset" connection="GLPI" query="Computer" filter-serial="{Job}"/>
+        <etiq:field name="Job" source="prompt" required="true"/>
+        <etiq:field name="Lot" source="prompt"/>
+        <etiq:field name="Co" source="fixed" value="Done and Bonkers" sensitive="true" stand-in="SAMPLE CO"/>
+        <etiq:field name="Name" source="epicor" from="Asset" column="name"/>
+        <etiq:field name="Title" source="compose">
+          <etiq:seg ref="Co"/><etiq:seg value=" Container I.D."/>
+        </etiq:field>
+        <etiq:field name="Line" source="compose">
+          <etiq:seg ref="Lot"/><etiq:seg value="/"/><etiq:seg ref="Name"/>
+        </etiq:field>
+      </etiq:label></metadata>
+      <text x="8" y="20" data-field="Title">t</text>
+    </svg>
+    """;
+
+Check("snapshot: per-field — one failing field never hides the rest", () =>
+{
+    var t = EtiqTemplate.Parse(SnapshotTemplate);
+    var snap = Etiq.Editor.Core.Preview.Produce(t,
+        subs => new ResolveContext
+        {
+            PromptValues = new() { ["Job"] = "", ["Lot"] = "L1" },
+            SourceColumn = (_, _) => throw new InvalidOperationException("waiting for Job"),
+            Substitutes = subs,
+        }, standIns: null, generation: 3);
+    Assert(snap.Errors.ContainsKey("Job"), "required-empty Job is an ERROR, not a crash");
+    Assert(snap.Errors.ContainsKey("Name"), "Name (reads the source) errors");
+    Assert(snap.Errors.ContainsKey("Line"), "Line (compose over Name) errors");
+    AssertEq("L1", snap.Values["Lot"], "Lot still resolves");
+    AssertEq("Done and Bonkers Container I.D.", snap.Values["Title"], "Title still resolves");
+    Assert(!snap.Values.ContainsKey("Job") && !snap.Errors.ContainsKey("Lot"), "a field is in exactly one map");
+    AssertEq(3, snap.Generation, "generation carried");
+    Assert(snap.Display("Job", false) is null, "errored field displays as nothing");
+    AssertEq("L1", snap.Display("Lot", false), "resolved field displays its value");
+});
+
+Check("snapshot: redacted twin feeds stand-ins INTO the resolve (compose redacts inside)", () =>
+{
+    var t = EtiqTemplate.Parse(SnapshotTemplate);
+    var standIns = new Dictionary<string, string> { ["Co"] = "SAMPLE CO" };
+    var snap = Etiq.Editor.Core.Preview.Produce(t,
+        subs => new ResolveContext
+        {
+            PromptValues = new() { ["Job"] = "J1", ["Lot"] = "L1" },
+            SourceColumn = (_, col) => col == "name" ? "PC-01" : null,
+            Substitutes = subs,
+        }, standIns, generation: 1);
+    AssertEq("Done and Bonkers Container I.D.", snap.Values["Title"], "plain pass has the real value");
+    AssertEq("SAMPLE CO Container I.D.", snap.Redacted!["Title"], "redacted pass substituted at the field level");
+    AssertEq("SAMPLE CO Container I.D.", snap.Display("Title", redact: true), "Display(redact) reads the twin");
+    AssertEq("Done and Bonkers Container I.D.", snap.Display("Title", redact: false), "Display(plain) reads values");
+    AssertEq("L1/PC-01", snap.Values["Line"], "fetched column flows into the compose");
+    Assert(!snap.HasErrors, "nothing errored");
+});
+
+Check("snapshot: no stand-ins → no redacted twin", () =>
+{
+    var t = EtiqTemplate.Parse(SnapshotTemplate);
+    var snap = Etiq.Editor.Core.Preview.Produce(t,
+        subs => new ResolveContext { PromptValues = new() { ["Job"] = "J", ["Lot"] = "L" },
+                                     SourceColumn = (_, _) => "x", Substitutes = subs },
+        new Dictionary<string, string>(), 0);
+    Assert(snap.Redacted is null, "empty stand-ins → null twin");
+    AssertEq(snap.Values["Title"], snap.Display("Title", redact: true), "Display(redact) falls back to values");
+});
+
+Check("source cache: failures retry next generation, rows persist", () =>
+{
+    var c = new Etiq.Editor.Core.SourceCache(cap: 2);
+    c.Fail("sig-bad", "not found");
+    Assert(c.IsFailed("sig-bad", out var m) && m == "not found", "failed in this generation");
+    c.Bump();
+    Assert(!c.IsFailed("sig-bad", out _), "a new generation retries");
+    var row = new Dictionary<string, System.Text.Json.JsonElement>();
+    c.Store("sig-ok", row);
+    c.Bump(); c.Bump();
+    Assert(c.TryGetRow("sig-ok", out _), "rows survive generations");
+    c.Fail("sig-ok", "later failure");
+    c.Store("sig-ok", row);
+    Assert(!c.IsFailed("sig-ok", out _), "a stored row clears its failure");
+    c.Store("a", row); c.Store("b", row);                // cap 2: overflow empties
+    Assert(c.RowCount <= 2, "bounded");
+    int g = c.Generation;
+    c.Clear();
+    AssertEq(0, c.RowCount, "Clear drops rows");
+    Assert(c.Generation == g + 1, "Clear bumps the generation");
+});
+
+// ---------- changelog slicing (update dialog) ----------
+
+const string SampleChangelog = """
+    # Changelog
+
+    Preamble line.
+
+    ## [Unreleased]
+
+    ### Fixed
+    - not shipped yet
+
+    ## [0.10.2] — 2026-09-08
+
+    ### Fixed
+    - continuous set
+
+    ## [0.10.1] — 2026-09-08
+
+    ### Fixed
+    - copies
+
+    ## [0.10.0] — 2026-09-07
+
+    ### Added
+    - grid
+
+    ## [0.9.0] — 2026-09-04
+
+    ### Added
+    - prompts
+    """;
+
+Check("changelog: rolled-up view spans every skipped release", () =>
+{
+    string s = Changelog.Between(SampleChangelog, new Version(0, 9, 0), new Version(0, 10, 2));
+    Assert(s.Contains("Preamble line."), "preamble kept");
+    Assert(s.Contains("[0.10.2]") && s.Contains("continuous set"), "latest kept");
+    Assert(s.Contains("[0.10.1]") && s.Contains("copies"), "skipped middle release kept");
+    Assert(s.Contains("[0.10.0]") && s.Contains("grid"), "skipped release kept");
+    Assert(!s.Contains("[0.9.0]") && !s.Contains("prompts"), "current version's own notes dropped");
+    Assert(!s.Contains("Unreleased") && !s.Contains("not shipped yet"), "[Unreleased] dropped");
+});
+
+Check("changelog: main ahead of the offered release is trimmed", () =>
+{
+    // user on 0.10.0, offered 0.10.1 while main already carries 0.10.2
+    string s = Changelog.Between(SampleChangelog, new Version(0, 10, 0), new Version(0, 10, 1));
+    Assert(s.Contains("[0.10.1]"), "offered release kept");
+    Assert(!s.Contains("[0.10.2]") && !s.Contains("continuous set"), "newer-than-offered dropped");
+    Assert(!s.Contains("[0.10.0]"), "current dropped");
+});
+
+Check("changelog: version component normalization (0.10.2 vs 0.10.2.0)", () =>
+{
+    // System.Version treats a missing component as -1; bounds and headings
+    // must compare on the same footing or the latest release vanishes
+    string s = Changelog.Between(SampleChangelog, new Version("0.10.1"), new Version("0.10.2"));
+    Assert(s.Contains("[0.10.2]"), "latest kept with 3-part bounds");
+    Assert(!s.Contains("[0.10.1]"), "current dropped with 3-part bounds");
+    AssertEq(new Version(0, 10, 2, 0), Changelog.ParseHeading("## [v0.10.2] — today"), "v-prefixed heading");
+    Assert(Changelog.ParseHeading("## [Unreleased]") is null, "unreleased → null");
+    Assert(Changelog.ParseHeading("### Fixed") is null, "non-version heading → null");
+});
+
+Check("changelog: nothing in range → whole file (never an empty dialog)", () =>
+{
+    string s = Changelog.Between("just some text\nno headings", new Version(0, 1, 0), new Version(0, 2, 0));
+    AssertEq("just some text\nno headings", s, "unparseable passthrough");
+    string t = Changelog.Between(SampleChangelog, new Version(0, 10, 2), new Version(0, 10, 2));
+    AssertEq(SampleChangelog, t, "already current → full file");
+});
+
 Console.WriteLine($"\n{passed} passed, {failed} failed");
 return failed;
 
