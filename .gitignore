@@ -48,3 +48,6 @@ src/Etiq.Btw/
 # local full solution — includes the private Etiq.Btw project, so it must not
 # ship; public clones use Etiquette.sln (see PROVENANCE.md)
 /Etiquette.Local.sln
+
+# files the Claude desktop app drops into the connected folder — never repo content
+/Claude outputs/

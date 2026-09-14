@@ -26,7 +26,7 @@ apart:
   merge data into the template, generate barcodes, print via any Windows
   printer driver — plus a ZPL raster path for thermal printers.
 
-## What it does today (v0.11)
+## What it does today (v0.12)
 
 - **Barcodes, dependency-free:** Code 128, GS1-128, Code 39 (+extended),
   ITF-14, QR (versions 1–40, all ECC levels), rMQR, Aztec, DataMatrix
@@ -58,7 +58,9 @@ apart:
   printer name); rulers and draggable, magnetic guides saved per
   template; a **Redact Sensitive** mode that shows stand-ins for flagged
   fields on screen — inside composes too — for remote demos, while
-  printing stays real.
+  printing stays real. Drag an `.svg` onto the window (or the empty
+  canvas) to open it; drop a PNG/JPG onto the canvas to place it; Shift
+  keeps aspect while resizing.
 - **Live ERP/CMDB data:** Epicor BAQ *and* GLPI queries by connection
   name, query-fed pick lists, per-printer offsets, a JSON-lines print log
   with a reprint viewer, and proof prints on ordinary office printers

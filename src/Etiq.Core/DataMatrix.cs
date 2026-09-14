@@ -74,12 +74,46 @@ public static class DataMatrix
     /// cols/rows ratio best matches the box — a wide skinny box gets 8x32
     /// (4.0) over 12x26 (2.17). With no aspect the smallest fitting
     /// rectangle wins, as before.</summary>
-    public static bool[,]? Encode(string content, bool preferRect, double targetAspect)
+    public static bool[,]? Encode(string content, bool preferRect, double targetAspect) =>
+        Encode(content, preferRect, targetAspect, 0);
+
+    /// <summary>minSquare: pad to AT LEAST this square size (rows = cols,
+    /// one of the ECC200 sizes 10…144; 0 = smallest that fits). This is how
+    /// a spec that shows a "2×2" symbol is met: sizes 32–52 carry 2×2 data
+    /// regions (the internal alignment cross), 64–104 4×4, 120–144 6×6 —
+    /// the look depends only on the symbol size, never on the content.
+    /// Content too long for the requested size steps up to the next that
+    /// fits, as without the option. Ignored for the rectangular formats.</summary>
+    public static bool[,]? Encode(string content, bool preferRect, double targetAspect, int minSquare)
     {
         var cw = Encodation(content);
         if (cw is null) return null;
         if (preferRect && BestRect(cw, targetAspect) is { } r) return r;
-        return Build(cw, Square);
+        return Build(cw, Square, minSquare);
+    }
+
+    /// <summary>The square symbol sizes ECC200 defines (rows = cols).</summary>
+    public static IReadOnlyList<int> SquareSizes { get; } =
+        Enumerable.Range(0, Square.GetLength(0)).Select(i => Square[i, 0]).ToArray();
+
+    /// <summary>The six rectangular formats as "RxC" (8x18 … 16x48).</summary>
+    public static IReadOnlyList<string> RectNames { get; } =
+        Enumerable.Range(0, Rect.GetLength(0)).Select(i => $"{Rect[i, 0]}x{Rect[i, 1]}").ToArray();
+
+    /// <summary>symSize (data-symsize): "32" = pad to at least that square;
+    /// "12x36" = force that rectangular format (whatever preferRect says;
+    /// content that does not fit it falls back to the best rectangle, then
+    /// to a square); null/"" = as without the option.</summary>
+    public static bool[,]? Encode(string content, bool preferRect, double targetAspect, string? symSize)
+    {
+        if (string.IsNullOrWhiteSpace(symSize)) return Encode(content, preferRect, targetAspect, 0);
+        if (int.TryParse(symSize, out int sq)) return Encode(content, preferRect, targetAspect, sq);
+        var cw = Encodation(content);
+        if (cw is null) return null;
+        for (int i = 0; i < Rect.GetLength(0); i++)
+            if ($"{Rect[i, 0]}x{Rect[i, 1]}" == symSize && cw.Count <= Rect[i, 6])
+                return BuildAt(cw, Rect, i);
+        return BestRect(cw, targetAspect) ?? Build(cw, Square);
     }
 
     private static bool[,]? BestRect(List<byte> data, double targetAspect)
@@ -123,10 +157,10 @@ public static class DataMatrix
 
     /// <summary>Pick the smallest symbol in the table, pad, compute RS ecc,
     /// place, and assemble the finder borders. Null when nothing fits.</summary>
-    private static bool[,]? Build(List<byte> data, int[,] t)
+    private static bool[,]? Build(List<byte> data, int[,] t, int minSquare = 0)
     {
         for (int i = 0; i < t.GetLength(0); i++)
-            if (data.Count <= t[i, 6]) return BuildAt(data, t, i);
+            if (data.Count <= t[i, 6] && t[i, 0] >= minSquare) return BuildAt(data, t, i);
         return null;
     }
 

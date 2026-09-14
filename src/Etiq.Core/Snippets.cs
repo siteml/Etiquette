@@ -21,7 +21,9 @@ public static class SnippetLibrary
             {
                 try
                 {
-                    var el = XElement.Load(f);
+                    var xd = XDocument.Load(f);
+                    EtiqTemplate.UpgradeNamespace(xd);   // user-saved snippets from before 0.12
+                    var el = xd.Root!;
                     if (el.Name != EtiqTemplate.Ns + "snippet") continue;
                     outp.Add(new Snippet(
                         (string?)el.Attribute("name") ?? System.IO.Path.GetFileNameWithoutExtension(f),

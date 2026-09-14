@@ -121,3 +121,9 @@ Two functions, called via `POST /api/v2/efx/{Company}/EtiqCounters/{fn}`:
   refused, etc.). AIAG serial rules care about uniqueness, not density.
 - `LocalFileCounterProvider` (Counters.cs) exists for dev machines without
   Epicor creds. It is single-machine only and must never ship to stations.
+- **Previews never reserve.** The editor resolves every preview, picker
+  and sample through `PeekCounterProvider`, which answers `ReserveAsync`
+  with the inner provider's `PeekAsync` — the canvas shows the *next*
+  serial and nothing advances until a print (Print All: one reservation
+  per row). Any future provider only needs a correct `PeekAsync` for this
+  to hold.

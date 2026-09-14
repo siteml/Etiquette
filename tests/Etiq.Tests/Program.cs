@@ -53,7 +53,7 @@ Check("examples validate clean", () =>
 Check("undeclared field detected", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
           <text x="8" y="20" data-field="Ghost">x</text>
         </svg>
         """);
@@ -64,13 +64,13 @@ Check("undeclared field detected", () =>
 Check("serial without counter, bad symbology, degenerate rect, out-of-bounds", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="S" source="serial"/>
           </etiq:label></metadata>
           <text x="8" y="20" data-field="S">000001</text>
           <rect x="8" y="30" width="0" height="40" data-barcode="code999" data-field="S"/>
-          <text x="500" y="20">off the label</text>
+          <text x="5000" y="20">off the label</text>
         </svg>
         """);
     var codes = TemplateValidator.Validate(t).Select(f => f.Code).ToHashSet();
@@ -81,7 +81,7 @@ Check("serial without counter, bad symbology, degenerate rect, out-of-bounds", (
 Check("module-mils below AIAG warns", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
           <rect x="8" y="8" width="100" height="40" data-barcode="code128"
                 data-value="X" data-module-mils="7"/>
         </svg>
@@ -95,8 +95,8 @@ Check("module-mils below AIAG warns", () =>
 Check("0.2 valid kitchen-sink template has no errors", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="PartNo" source="prompt" caption="Part:"/>
             <etiq:field name="Plant" source="rest" connection="glpi"
                         query="assets" pick="assets[0].location" on-fail="cached"/>
@@ -131,8 +131,8 @@ Check("0.2 valid kitchen-sink template has no errors", () =>
 Check("compose: bad segs, bad ref, nested compose, bad pad", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="A" source="fixed" value="x"/>
             <etiq:field name="C1" source="compose">
               <etiq:seg value="lit" ref="A"/>
@@ -156,8 +156,8 @@ Check("compose: bad segs, bad ref, nested compose, bad pad", () =>
 Check("maps: unresolved ref, no default warns, bad when", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="A" source="fixed" value="x"/>
             <etiq:field name="C" source="compose">
               <etiq:seg ref="A" map="NoSuchMap"/>
@@ -180,8 +180,8 @@ Check("maps: unresolved ref, no default warns, bad when", () =>
 Check("rest: missing connection/pick, bad pick, bad on-fail", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="R1" source="rest"/>
             <etiq:field name="R2" source="rest" connection="glpi" pick="$.assets[*].name"/>
             <etiq:field name="R3" source="rest" connection="glpi" pick="a.b" on-fail="retry"/>
@@ -204,8 +204,8 @@ Check("rest: missing connection/pick, bad pick, bad on-fail", () =>
 Check("reserved kinds: structural checks + reserved warning", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="D" source="db" connection="mes"/>
             <etiq:field name="Fi" source="file" path="\\srv\lots.csv" column="Lot" match-column="Part"/>
             <etiq:field name="W" source="device" connection="scale1"/>
@@ -230,8 +230,8 @@ Check("reserved kinds: structural checks + reserved warning", () =>
 Check("layers: dup name, misplaced attr, no-print with fields, bad data-print", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="A" source="fixed" value="x"/>
           </etiq:label></metadata>
           <g data-layer="L1"><text x="8" y="20">a</text></g>
@@ -255,10 +255,10 @@ Check("layers: dup name, misplaced attr, no-print with fields, bad data-print", 
 Check("text fit: overflow without width, wrap without height, box out of bounds", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
           <text x="8" y="20" data-overflow="shrink">a</text>
           <text x="8" y="40" data-width="50" data-overflow="wrap">b</text>
-          <text x="200" y="60" data-width="150">c</text>
+          <text x="2900" y="60" data-width="150">c</text>
           <text x="144" y="80" text-anchor="middle" data-width="200" data-overflow="clip">ok centered</text>
         </svg>
         """);
@@ -272,8 +272,8 @@ Check("text fit: overflow without width, wrap without height, box out of bounds"
 Check("compose seg ref marks target field as used", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Inner" source="fixed" value="x"/>
             <etiq:field name="C" source="compose"><etiq:seg ref="Inner"/></etiq:field>
           </etiq:label></metadata>
@@ -287,8 +287,8 @@ Check("compose seg ref marks target field as used", () =>
 Check("on-fail use: feeding a barcode warns (direct + via compose)", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="R" source="rest" connection="glpi" pick="a.b" on-fail="use:NA"/>
             <etiq:field name="C" source="compose"><etiq:seg ref="R"/></etiq:field>
           </etiq:label></metadata>
@@ -305,8 +305,8 @@ Check("on-fail use: feeding a barcode warns (direct + via compose)", () =>
 Check("resolver: kitchen-sink compose resolves end-to-end", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="PartNo" source="prompt" caption="Part:"/>
             <etiq:field name="Plant" source="rest" connection="glpi" pick="assets[0].location"/>
             <etiq:field name="Serial" source="serial" counter="ACME" format="000000"/>
@@ -345,8 +345,8 @@ Check("resolver: kitchen-sink compose resolves end-to-end", () =>
 Check("resolver: serial memoized once per label, fresh per label", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="S" source="serial" counter="A"/>
             <etiq:field name="C1" source="compose"><etiq:seg ref="S"/><etiq:seg ref="S"/></etiq:field>
             <etiq:field name="C2" source="compose"><etiq:seg ref="S"/></etiq:field>
@@ -368,8 +368,8 @@ Check("resolver: serial memoized once per label, fresh per label", () =>
 Check("resolver: on-fail block/cached/use + cache write-through", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="B" source="rest" connection="c" pick="a" on-fail="block"/>
             <etiq:field name="C" source="rest" connection="c" pick="a" on-fail="cached"/>
             <etiq:field name="U" source="rest" connection="c" pick="a" on-fail="use:N/A"/>
@@ -400,8 +400,8 @@ Check("resolver: on-fail block/cached/use + cache write-through", () =>
 Check("resolver: maps exact>prefix>default precedence, no-default blocks", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="In" source="prompt" caption="v:"/>
             <etiq:field name="M" source="compose"><etiq:seg ref="In" map="T"/></etiq:field>
             <etiq:field name="MD" source="compose"><etiq:seg ref="In" map="T" default="segdflt"/></etiq:field>
@@ -429,8 +429,8 @@ Check("resolver: maps exact>prefix>default precedence, no-default blocks", () =>
 Check("resolver: if-empty, required, reserved kinds fail at print", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="E" source="prompt" caption="v:" if-empty="fallback"/>
             <etiq:field name="R" source="prompt" caption="v:" required="true"/>
             <etiq:field name="W" source="device" connection="scale1"/>
@@ -449,8 +449,8 @@ Check("resolver: if-empty, required, reserved kinds fail at print", () =>
 Check("resolver: field case= is opt-in, normalizes, validator gates enum", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Lot" source="prompt" caption="Lot:" case="upper"/>
             <etiq:field name="Note" source="prompt" caption="Note:"/>
             <etiq:field name="Co" source="prompt" caption="Co:" case="title"/>
@@ -482,8 +482,8 @@ Check("resolver: field case= is opt-in, normalizes, validator gates enum", () =>
 Check("resolver: seg split/part picks a delimited piece; validator gates it", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Path" source="prompt"/>
             <etiq:field name="Loc" source="compose">
               <etiq:seg ref="Path" split=" &gt; " part="-2"/>
@@ -511,8 +511,8 @@ Check("resolver: seg split/part picks a delimited piece; validator gates it", ()
 Check("resolver: transform order + number/date formats", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="In" source="fixed" value="ab7"/>
             <etiq:field name="T" source="compose">
               <etiq:seg ref="In" start="2" len="1" format="number:0000" pad="left:*:6"/>
@@ -534,8 +534,8 @@ Check("resolver: transform order + number/date formats", () =>
 Check("pick lists: set behavior, default, no-selection blocks, validator", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:list name="ShipTo" key="Name" default="Springfield Plant">
               <etiq:row Name="Springfield Plant" Addr="100 Example Ave" City="Springfield, IL"/>
               <etiq:row Name="Monterrey Plant" Addr="Av. Ejemplo 100" City="Monterrey, N.L."/>
@@ -584,8 +584,8 @@ Check("pick lists: set behavior, default, no-selection blocks, validator", () =>
 Check("pick lists: validator catches structural problems", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:list name="L" key="K" default="nope">
               <etiq:row K="A" Extra="x"/>
               <etiq:row K="A"/>
@@ -624,8 +624,8 @@ Check("Csv: quotes, embedded commas/newlines, CRLF, short rows", () =>
 Check("BatchRunner: records x copies, autos, per-label serials, CSV feeds epicor", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Part" source="epicor" column="PartNum"/>
             <etiq:field name="Op" source="prompt" caption="Operator:"/>
             <etiq:field name="Ser" source="serial" counter="B" format="000"/>
@@ -665,8 +665,8 @@ Check("BatchRunner: records x copies, autos, per-label serials, CSV feeds epicor
 Check("BatchRunner: blocking failure names label/record", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Part" source="epicor" column="PartNum" required="true"/>
           </etiq:label></metadata>
           <text x="8" y="20" data-field="Part">p</text>
@@ -693,8 +693,8 @@ Check("editor: foreign content round-trips untouched", () =>
         <!-- designer comment -->
         <svg xmlns="http://www.w3.org/2000/svg"
              xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
-             xmlns:etiq="https://etiquette.dev/ns/0.1"
-             width="3in" height="1in" viewBox="0 0 288 96"
+             xmlns:etiq="urn:etiquette:label:0.1"
+             width="3in" height="1in" viewBox="0 0 3000 1000"
              inkscape:version="1.3">
           <metadata><etiq:label><etiq:field name="A" source="fixed" value="x"/></etiq:label></metadata>
           <g data-layer="L1" inkscape:groupmode="layer" inkscape:label="L1">
@@ -718,7 +718,7 @@ Check("editor: foreign content round-trips untouched", () =>
 Check("editor: drag merges into one undo step; undo/redo restore exactly", () =>
 {
     var doc = Etiq.Editor.Core.EditorDoc.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
           <g data-layer="L"><rect x="10" y="10" width="40" height="20"/></g>
         </svg>
         """);
@@ -762,7 +762,7 @@ Check("editor: rotated hit-test + handles + resize math", () =>
 Check("editor: layers, z-order, delete/undo, promote group", () =>
 {
     var doc = Etiq.Editor.Core.EditorDoc.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
           <g data-layer="L">
             <rect id="a" x="0" y="0" width="10" height="10"/>
             <rect id="b" x="20" y="0" width="10" height="10"/>
@@ -802,7 +802,7 @@ Check("editor: layers, z-order, delete/undo, promote group", () =>
 Check("editor: hit-test picks topmost, lines by distance, doc validates", () =>
 {
     var doc = Etiq.Editor.Core.EditorDoc.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
           <g data-layer="L">
             <rect id="under" x="10" y="10" width="60" height="40"/>
             <rect id="over" x="30" y="20" width="60" height="40"/>
@@ -824,7 +824,7 @@ Check("editor: hit-test picks topmost, lines by distance, doc validates", () =>
 Check("editor: multi-move is one undo entry, merges across drag", () =>
 {
     var doc = Etiq.Editor.Core.EditorDoc.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
           <g data-layer="L">
             <rect id="a" x="10" y="10" width="20" height="10"/>
             <rect id="b" x="50" y="10" width="20" height="10"/>
@@ -851,7 +851,7 @@ Check("editor: multi-move is one undo entry, merges across drag", () =>
 Check("editor: group/ungroup preserve z-position and undo cleanly", () =>
 {
     var doc = Etiq.Editor.Core.EditorDoc.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
           <g data-layer="L">
             <rect id="under" x="0" y="0" width="10" height="10"/>
             <rect id="a" x="10" y="10" width="20" height="10"/>
@@ -988,7 +988,7 @@ Check("compose: newline segs, smart sep, collapse-blank-lines", () =>
 {
     var t = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Name" source="fixed" value="Acme"/>
             <etiq:field name="Addr2" source="prompt"/>
             <etiq:field name="City" source="fixed" value="Springfield"/>
@@ -1029,7 +1029,7 @@ Check("compose: newline segs, smart sep, collapse-blank-lines", () =>
     // sep at line start suppressed (empty City case)
     var t2 = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="A" source="prompt"/>
             <etiq:field name="B" source="fixed" value="IL"/>
             <etiq:field name="C" source="compose">
@@ -1046,7 +1046,7 @@ Check("compose: newline segs, smart sep, collapse-blank-lines", () =>
     // validator: newline seg must be alone; collapse only on compose
     var bad = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="P" source="prompt" collapse-blank-lines="true"/>
             <etiq:field name="Q" source="compose">
               <etiq:seg newline="true" value="x"/>
@@ -1119,7 +1119,7 @@ Check("compose variants: switch-on picks the segment list (intl addresses)", () 
 {
     var tpl = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Country" source="prompt" caption="Country:"/>
             <etiq:field name="Street" source="prompt" caption="Street:"/>
             <etiq:field name="City" source="prompt" caption="City:"/>
@@ -1169,7 +1169,7 @@ Check("compose variants: switch-on picks the segment list (intl addresses)", () 
     // validator: variants need switch-on; mixed segs+variants flagged; no default warns
     var bad = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="A" source="prompt" caption="a"/>
             <etiq:field name="B" source="compose">
               <etiq:seg ref="A"/>
@@ -1192,7 +1192,7 @@ Check("variants: multi-value when + switch on a normalizing compose helper", () 
     // block switches on the code, one variant covers a format GROUP
     var tpl = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Country" source="prompt" caption="Country:"/>
             <etiq:field name="CC" source="compose">
               <etiq:seg ref="Country" case="upper" map="Codes"/>
@@ -1233,7 +1233,7 @@ Check("variants: multi-value when + switch on a normalizing compose helper", () 
     // chained switching is flagged; circular refs block instead of overflowing
     var chained = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="A" source="prompt" caption="a"/>
             <etiq:field name="B" source="compose" switch-on="A">
               <etiq:variant><etiq:seg value="x"/></etiq:variant>
@@ -1250,7 +1250,7 @@ Check("variants: multi-value when + switch on a normalizing compose helper", () 
         "switch-on a switching field flagged");
     var circular = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="A" source="compose" switch-on="A">
               <etiq:variant><etiq:seg value="x"/></etiq:variant>
             </etiq:field>
@@ -1313,7 +1313,7 @@ Check("BatchRunner: ListSelections survive into per-label contexts", () =>
 {
     var tpl = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Who" source="list" list="L" column="Name"/>
             <etiq:list name="L" key="K" default="a">
               <etiq:row K="a" Name="Alpha"/>
@@ -1726,7 +1726,7 @@ Check("Redaction: stand-in rules (literal / placeholder / mask), sensitive field
     Assert(sens.Count == 1 && sens.Contains("Addr"), "only bound sensitive fields listed");
     var doc2 = Etiq.Editor.Core.EditorDoc.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:list name="ShipTo" key="Name"><etiq:row Name="A" Addr="1 Real St"/></etiq:list>
             <etiq:list name="Dept" key="Name"><etiq:row Name="QA"/></etiq:list>
             <etiq:field name="Addr" source="list" list="ShipTo" column="Addr"/>
@@ -1741,7 +1741,7 @@ Check("Redaction: stand-in rules (literal / placeholder / mask), sensitive field
     // field-level flag + resolver substitutes: a compose of sensitive and public parts redacts only the sensitive part
     var doc3 = Etiq.Editor.Core.EditorDoc.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="CoName" source="fixed" value="Real Company Inc." sensitive="true" stand-in="SAMPLE CO"/>
             <etiq:field name="Street" source="fixed" value="1 Real St" sensitive="true"/>
             <etiq:field name="Title" source="compose"><etiq:seg ref="CoName"/><etiq:seg value=" Container I.D."/></etiq:field>
@@ -1801,7 +1801,7 @@ Check("list picker attrs: caption/display/filter parse + validate", () =>
 {
     var tpl = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Region" source="prompt" caption="Region:"/>
             <etiq:field name="Who" source="list" list="L" column="Name"/>
             <etiq:field name="Pick" source="compose">
@@ -1826,7 +1826,7 @@ Check("list picker attrs: caption/display/filter parse + validate", () =>
 
     var bad = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Who" source="list" list="L" column="Name"/>
             <etiq:list name="L" key="K" display="Nope" filter-column="Region">
               <etiq:row K="a" Name="Alpha"/>
@@ -1849,7 +1849,7 @@ Check("list picker attrs: caption/display/filter parse + validate", () =>
 
     var circular = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Who" source="list" list="L" column="Name"/>
             <etiq:list name="L" key="K" filter-column="Name" filter-ref="Who">
               <etiq:row K="a" Name="Alpha"/>
@@ -1866,7 +1866,7 @@ Check("list picker attrs: caption/display/filter parse + validate", () =>
     // attribute-derived order reshuffles after a reorder — the bug)
     var ordered = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Who" source="list" list="L" column="Name"/>
             <etiq:list name="L" key="K" columns="K,Addr2,Name">
               <etiq:row K="a" Name="Alpha"/>
@@ -2008,8 +2008,8 @@ Check("RestClient plugs into FieldResolver as the rest provider", () =>
     using var client = new RestClient(new ConnectionProfile
         { Name = "glpi", Kind = "none", BaseUrl = "https://g/" }, handler);
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Asset" source="rest" connection="glpi"
                         query="Computer/42" pick="name"/>
           </etiq:label></metadata>
@@ -2115,7 +2115,7 @@ Check("ConnectionDef glpi type → GlpiConfig; declared-query rest fields valida
 
     var t = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="2in" height="0.7in" viewBox="0 0 2000 700">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:query name="Asset" connection="GLPI" query="Computer" filter-serial="{Serial}"/>
             <etiq:field name="Serial" source="prompt" caption="Serial:"/>
             <etiq:field name="Name" source="rest" from="Asset" column="name" override="true"/>
@@ -2139,7 +2139,7 @@ Check("ConnectionDef glpi type → GlpiConfig; declared-query rest fields valida
 
     var t2 = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="2in" height="0.7in" viewBox="0 0 2000 700">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:query name="Asset" connection="GLPI" query="{Nope}" filter-serial="x"/>
             <etiq:field name="Name" source="rest" from="Asset" column="name"/>
           </etiq:label></metadata>
@@ -2151,11 +2151,17 @@ Check("ConnectionDef glpi type → GlpiConfig; declared-query rest fields valida
 
     var ctx = new ResolveContext
     {
-        PromptValues = new() { ["Serial"] = "SN1", ["Name"] = "" },
+        PromptValues = new() { ["Serial"] = "SN1" },   // Name absent → fetched
         SourceColumn = (src, col) => src == "Asset" ? (col == "name" ? "PC-1" : "INV-1") : null,
     };
     var r = new FieldResolver(t, ctx);
     AssertEq("PC-1", r.Resolve("Name"), "from= column via SourceColumn");
+    var blanked = new ResolveContext
+    {
+        PromptValues = new() { ["Serial"] = "SN1", ["Name"] = "" },   // present + empty = blank
+        SourceColumn = (_, _) => "PC-1",
+    };
+    AssertEq("", new FieldResolver(t, blanked).Resolve("Name"), "override blanked by operator");
     AssertEq("INV-1", r.Resolve("Inv"), "second column");
     var typed = new ResolveContext
     {
@@ -2169,7 +2175,7 @@ Check("query-fed pick list: validator, ctx.ListRows resolution, GLPI virtual col
 {
     var t = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="2in" height="0.7in" viewBox="0 0 2000 700">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:query name="Inventory" connection="GLPI" query="Computer"/>
             <etiq:list name="Assets" key="otherserial" from="Inventory"/>
             <etiq:list name="Bad" key="k" from="Nope"/>
@@ -2284,7 +2290,7 @@ Check("Registry load + feasibility: fit, module dots, snapping", () =>
     AssertEq(1, reg.Media.Count, "media");
 
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 576 384">
+        <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
           <rect x="10" y="10" width="200" height="60" data-barcode="code128"
                 data-value="X" data-module-mils="13"/>
           <rect x="10" y="100" width="200" height="60" data-barcode="code39"
@@ -2506,8 +2512,8 @@ Check("CredentialStore secret detection + passthrough", () =>
 Check("map ignore-case: per-map and per-row", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 100 100">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 1000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="In" source="prompt"/>
             <etiq:map name="Tare" default="-">
               <etiq:when from="FLEXIBLE" to="52" ignore-case="true"/>
@@ -2534,8 +2540,8 @@ Check("map ignore-case: per-map and per-row", () =>
 Check("prompt default= parses (data-panel prefill)", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 100 100">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 1000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="Qty" source="prompt" caption="QTY:" default="170"/>
             <etiq:field name="Lot" source="prompt"/>
           </etiq:label></metadata>
@@ -2662,12 +2668,34 @@ Check("QR / DataMatrix / PDF417 encoders (decode-verified vectors)", () =>
     AssertEq("AE437A8FC5C9C861", MatrixHash(Pdf417.Encode("Etiquette PDF417", 4)), "pdf417 vector");
     Assert(QrCode.Encode(new string('x', 3000), 'H') is null, "qr over capacity -> null");
     Assert(DataMatrix.Encode(new string('x', 1600)) is null, "datamatrix over capacity -> null");
+    // data-symsize: pad to a minimum square size — the "2×2 regions" look
+    // (32…52) comes from the symbol size alone, never from the content
+    Assert(DataMatrix.Encode("AB", false, 0)!.GetLength(0) == 10, "AB alone is 10x10");
+    var dm32 = DataMatrix.Encode("AB", false, 0, 32);
+    Assert(dm32 is not null && dm32.GetLength(0) == 32 && dm32.GetLength(1) == 32, "AB padded to 32x32");
+    Assert(DataMatrix.Encode(new string('x', 100), false, 0, 32)!.GetLength(0) == 40,
+        "content too long for 32 steps up to the next square that fits (40)");
+    Assert(DataMatrix.Encode("AB", true, 2.0, 32)!.GetLength(0) == 8, "min size is ignored for rectangles");
+    var dmr = DataMatrix.Encode("AB", false, 0, "12x36");
+    Assert(dmr is not null && dmr.GetLength(0) == 12 && dmr.GetLength(1) == 36, "forced rectangle 12x36 (even with square preferred)");
+    Assert(DataMatrix.Encode(new string('x', 60), false, 0, "8x18")!.GetLength(1) > 18, "content too long for the forced rectangle falls back");
+    Assert(DataMatrix.Encode("AB", false, 0, "32")!.GetLength(0) == 32, "string form of a square size");
+    Assert(DataMatrix.SquareSizes.SequenceEqual(new[] { 10,12,14,16,18,20,22,24,26,32,36,40,44,48,52,64,72,80,88,96,104,120,132,144 }),
+        "ECC200 square size table");
+    // the same knob on the other 2D codes
+    Assert(QrCode.Encode("HELLO", 'M', 7)!.GetLength(0) == 45, "qr min version 7 → 45x45");
+    Assert(Aztec.Encode("HELLO", 37)!.GetLength(0) >= 37, "aztec min 37 modules");
+    Assert(Aztec.Sizes[0] == 15 && Aztec.Sizes[^1] == 151 && Aztec.Sizes.Contains(19) && Aztec.Sizes.Contains(37), "aztec size table");
+    var rm = Rmqr.Encode("AB", false, 0, "11x59");
+    Assert(rm is not null && rm.GetLength(0) == 11 && rm.GetLength(1) == 59, "rmqr forced version R11x59");
+    Assert(Rmqr.Encode(new string('x', 100), false, 0, "7x43") is not null, "rmqr: content too long for the forced version falls back, never fails");   // 100 bytes > R7x43, < R17x139 (150 @ M)
+    Assert(Pdf417.Encode("AB", 4, -1, 20)!.GetLength(0) == 20, "pdf417 min rows 20");
     Assert(Pdf417.Encode(new string('x', 900), 6) is null, "pdf417 over 90 rows -> null");
 
     // barcode attribute validation: ecc / columns / logo
     var bc = EtiqTemplate.Parse("""
         <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 6000 4000">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="F" source="prompt" caption="f"/>
           </etiq:label></metadata>
           <g data-layer="L">
@@ -2677,10 +2705,30 @@ Check("QR / DataMatrix / PDF417 encoders (decode-verified vectors)", () =>
                   data-field="F" data-columns="99" data-logo="etiq"/>
             <rect x="1" y="1" width="900" height="900" data-barcode="qr"
                   data-field="F" data-logo="etiq" data-ecc="L" data-logo-scale="200"/>
+            <rect x="1" y="1" width="900" height="300" data-barcode="code128"
+                  data-field="F" data-hri="below" data-hri-size="-5" data-hri-align="middle" data-hri-gap="x"/>
+            <rect x="1" y="1" width="900" height="300" data-barcode="code128"
+                  data-field="F" data-hri-size="80"/>
+            <rect x="1" y="1" width="900" height="300" data-barcode="code128"
+                  data-field="F" data-hri="above" data-hri-size="300"/>
+            <rect x="1" y="1" width="900" height="300" data-barcode="code128"
+                  data-field="F" data-module-lock="1"/>
+            <rect x="1" y="1" width="900" height="300" data-barcode="code128"
+                  data-field="F" data-module-lock="yes" data-module-mils="15"/>
+            <rect x="1" y="1" width="90" height="300" data-barcode="code128"
+                  data-field="F" data-module-lock="1" data-module-mils="150"/>
           </g>
         </svg>
         """);
     var bf = TemplateValidator.Validate(bc);
+    Assert(bf.Any(f => f.Code == "barcode-hri" && f.Message.Contains("data-hri-size must")), "negative hri size errs");
+    Assert(bf.Any(f => f.Code == "barcode-hri" && f.Message.Contains("data-hri-align")), "bad hri align errs");
+    Assert(bf.Any(f => f.Code == "barcode-hri" && f.Message.Contains("data-hri-gap")), "bad hri gap errs");
+    Assert(bf.Any(f => f.Code == "barcode-hri" && f.Message.Contains("have no effect")), "hri-* without hri warns");
+    Assert(bf.Any(f => f.Code == "barcode-hri" && f.Message.Contains("no room left")), "hri size >= box warns");
+    Assert(bf.Any(f => f.Code == "barcode-module" && f.Message.Contains("has no effect")), "module-lock without mils warns");
+    Assert(bf.Any(f => f.Code == "barcode-module" && f.Message.Contains("must be")), "module-lock other than 1 errs");
+    Assert(bf.Any(f => f.Code == "barcode-module" && f.Message.Contains("wider than the box")), "exact module wider than box errs");
     Assert(bf.Any(f => f.Code == "barcode-ecc" && f.Severity == Severity.Error), "bad data-ecc errs");
     Assert(bf.Any(f => f.Code == "barcode-columns" && f.Severity == Severity.Error), "bad data-columns errs");
     Assert(bf.Any(f => f.Code == "barcode-logo" && f.Message.Contains("only applies to qr")),
@@ -2690,6 +2738,98 @@ Check("QR / DataMatrix / PDF417 encoders (decode-verified vectors)", () =>
     Assert(bf.Any(f => f.Code == "barcode-logo" && f.Severity == Severity.Error
                     && f.Message.Contains("data-logo-scale")),
         "out-of-range logo scale errs");
+});
+
+Check("counters: PeekCounterProvider never advances; the real provider does", () =>
+{
+    string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "etiq-test-counters-" + Guid.NewGuid().ToString("N") + ".json");
+    try
+    {
+        var real = new LocalFileCounterProvider(path);
+        var peek = new PeekCounterProvider(real);
+        AssertEq(1L, peek.ReserveAsync("SER").Result, "peek 'reserve' shows the next value");
+        AssertEq(1L, peek.ReserveAsync("SER").Result, "…and again: nothing advanced");
+        AssertEq(1L, real.ReserveAsync("SER").Result, "real reserve issues 1");
+        AssertEq(2L, peek.ReserveAsync("SER").Result, "peek now shows 2");
+        AssertEq(2L, real.ReserveAsync("SER", 3).Result, "block of 3 starts at 2");
+        AssertEq(5L, peek.PeekAsync("SER").Result, "next after the block is 5");
+        // through the resolver: a preview context peeks, a print context reserves
+        var t = EtiqTemplate.Parse("""
+            <svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 1000 1000">
+              <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
+                <etiq:field name="S" source="serial" counter="SER" format="0000"/>
+              </etiq:label></metadata>
+              <text x="1" y="1" data-field="S">s</text>
+            </svg>
+            """);
+        AssertEq("0005", new FieldResolver(t, new ResolveContext { Counters = peek }).Resolve("S"), "preview resolve peeks");
+        AssertEq("0005", new FieldResolver(t, new ResolveContext { Counters = peek }).Resolve("S"), "still 0005");
+        AssertEq("0005", new FieldResolver(t, new ResolveContext { Counters = real }).Resolve("S"), "print resolve takes 0005");
+        AssertEq("0006", new FieldResolver(t, new ResolveContext { Counters = peek }).Resolve("S"), "preview then shows 0006");
+    }
+    finally { try { System.IO.File.Delete(path); } catch { } }
+});
+
+Check("validator: viewBox must be in mils (a 96 px/in viewBox is called out)", () =>
+{
+    var px = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="6in" height="4in" viewBox="0 0 576 384">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1"/></metadata>
+        </svg>
+        """);
+    var f = TemplateValidator.Validate(px).FirstOrDefault(x => x.Code == "root-viewbox");
+    Assert(f is { Severity: Severity.Error } && f.Message.Contains("96 px/in"), "px viewBox errs with the hint");
+    var mm = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="50mm" height="25mm" viewBox="0 0 1969 984">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1"/></metadata>
+        </svg>
+        """);
+    Assert(!TemplateValidator.Validate(mm).Any(x => x.Code == "root-viewbox"), "mm width with mils viewBox is fine");
+});
+
+Check("namespace: pre-0.12 https URI upgrades to the URN on parse, validator warns, save writes the URN", () =>
+{
+    const string legacy = "https://etiquette.dev/ns/0.1";
+    var t = EtiqTemplate.Parse($"""
+        <svg xmlns="http://www.w3.org/2000/svg" width="4in" height="2in" viewBox="0 0 4000 2000">
+          <metadata><etiq:label xmlns:etiq="{legacy}">
+            <etiq:field name="F" source="prompt" caption="f"/>
+          </etiq:label></metadata>
+          <text x="10" y="100" font-size="80" data-field="F">f</text>
+        </svg>
+        """);
+    Assert(t.LegacyNamespace, "flagged as legacy");
+    AssertEq(1, t.Fields.Count, "fields parsed through the upgraded namespace");
+    Assert(TemplateValidator.Validate(t).Any(f => f.Code == "namespace"), "validator warns");
+    Assert(!t.Doc.ToString().Contains(legacy), "no legacy URI left in the document");
+    Assert(t.Doc.ToString().Contains(EtiqTemplate.Ns.NamespaceName), "URN declared");
+    var cur = EtiqTemplate.Parse(t.Doc.ToString());
+    Assert(!cur.LegacyNamespace, "re-parse of the upgraded doc is current");
+    var ed = Etiq.Editor.Core.EditorDoc.Parse(t.Doc.ToString().Replace(EtiqTemplate.Ns.NamespaceName, legacy));
+    Assert(ed.LegacyNamespace && ed.Xml.ToString().Contains(EtiqTemplate.Ns.NamespaceName), "editor doc upgrades too");
+});
+
+Check("validator: <image> objects — source present, box positive, fit", () =>
+{
+    var t = EtiqTemplate.Parse("""
+        <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+             width="6in" height="4in" viewBox="0 0 6000 4000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1"/></metadata>
+          <image x="10" y="10" width="800" height="400"
+                 href="data:image/png;base64,iVBORw0KGgo="/>
+          <image x="10" y="10" width="800" height="400"
+                 xlink:href="data:image/png;base64,iVBORw0KGgo=" preserveAspectRatio="xMinYMin slice"/>
+          <image x="10" y="10" width="800" height="400"/>
+          <image x="10" y="10" width="0" height="400" href="data:image/png;base64,iVBORw0KGgo="/>
+          <image x="10" y="10" width="800" height="400" href="data:image/png;base64,iVBORw0KGgo=" data-threshold="150"/>
+        </svg>
+        """);
+    var f = TemplateValidator.Validate(t);
+    AssertEq(1, f.Count(x => x.Code == "image-source" && x.Severity == Severity.Error), "one image without href errs");
+    Assert(!f.Any(x => x.Code == "image-source" && x.Message.Contains("not found")), "data: and xlink:href sources are accepted");
+    AssertEq(1, f.Count(x => x.Code == "image-box"), "zero width errs");
+    AssertEq(1, f.Count(x => x.Code == "image-fit"), "non-default preserveAspectRatio warns");
+    AssertEq(1, f.Count(x => x.Code == "image-threshold"), "threshold outside 1-99 errs");
 });
 
 Check("editor: layer ops — move-to-layer (group units), reorder, remove", () =>
@@ -2743,8 +2883,8 @@ Check("editor: layer ops — move-to-layer (group units), reorder, remove", () =
 Check("FieldsFeedingRemote: direct, through compose, through variant switch; nothing without sources", () =>
 {
     var t = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:query name="Asset" connection="GLPI" query="{Kind}" filter-serial="{Key}"/>
             <etiq:field name="Serial" source="prompt"/>
             <etiq:field name="Site" source="prompt"/>
@@ -2768,8 +2908,8 @@ Check("FieldsFeedingRemote: direct, through compose, through variant switch; not
         Assert(!fed.Contains(n), $"{n} must not (only Lot's own compose reads it; Name is the OUTPUT)");
 
     var none = EtiqTemplate.Parse("""
-        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-          <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+          <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
             <etiq:field name="A" source="prompt"/>
             <etiq:field name="B" source="compose"><etiq:seg ref="A"/></etiq:field>
           </etiq:label></metadata>
@@ -2782,8 +2922,8 @@ Check("FieldsFeedingRemote: direct, through compose, through variant switch; not
 // ---------- preview snapshot (docs/data-flow.md) ----------
 
 const string SnapshotTemplate = """
-    <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 288 96">
-      <metadata><etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+    <svg xmlns="http://www.w3.org/2000/svg" width="3in" height="1in" viewBox="0 0 3000 1000">
+      <metadata><etiq:label xmlns:etiq="urn:etiquette:label:0.1">
         <etiq:query name="Asset" connection="GLPI" query="Computer" filter-serial="{Job}"/>
         <etiq:field name="Job" source="prompt" required="true"/>
         <etiq:field name="Lot" source="prompt"/>
@@ -3165,7 +3305,7 @@ static class BarcodeDump
         }
         var samples = new List<string>
         {
-            "A", "42", "HELLO WORLD", "https://etiquette.dev/t?id=12345",
+            "A", "42", "HELLO WORLD", "https://example.com/t?id=12345",
             "1234567890123456789012345678901234567890",
         };
         foreach (int len in new[] { 3, 8, 17, 33, 60, 100, 180, 300, 500, 900, 1600 })

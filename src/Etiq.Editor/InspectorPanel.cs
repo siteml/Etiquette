@@ -1,4 +1,5 @@
 using Etiq.Editor.Core;
+using System.Xml.Linq;
 
 namespace Etiq.Editor;
 
@@ -194,7 +195,17 @@ public sealed class InspectorPanel : UserControl
             : logo.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
                 ? "data:" + logo.Length          // length, not the whole URI, as key
                 : "custom";
-        return $"{o.Kind}|{(string?)o.El.Attribute("data-barcode")}|{logoKey}";
+        // every attribute that decides WHICH rows exist is part of the key
+        // — the cached control set is shared by all objects of one shape,
+        // and Reshape() after an edit only rebuilds when the key changes
+        string hri = (string?)o.El.Attribute("data-hri") is "below" or "above" ? "hri" : "";
+        string locked = (string?)o.El.Attribute("data-lock-size") == "1" ? "lock" : "";
+        string exact = (string?)o.El.Attribute("data-module-lock") == "1" ? "exact" : "";
+        string mono = o.GetNum("data-threshold", 0) is > 0 and < 100 ? "mono" : "";
+        string img = o.Kind == ObjectKind.Image
+            ? (LabelRenderer.ImageHref(o) ?? "").StartsWith("data:", StringComparison.OrdinalIgnoreCase) ? "embedded" : "linked"
+            : "";
+        return $"{o.Kind}|{(string?)o.El.Attribute("data-barcode")}|{logoKey}|{hri}|{locked}|{exact}|{mono}|{img}";
     }
 
     /// <summary>Re-read every value from the model (live drag / undo /
@@ -316,6 +327,7 @@ public sealed class InspectorPanel : UserControl
             case ObjectKind.Image:
                 AddLen("Width", () => O.GetNum("width"), v => SetAttr(O, "width", N(v), "set width"));
                 AddLen("Height", () => O.GetNum("height"), v => SetAttr(O, "height", N(v), "set height"));
+                BuildImageRows();
                 break;
         }
     }
@@ -333,6 +345,15 @@ public sealed class InspectorPanel : UserControl
         });
         AddSensitive();
         AddClearBlank();
+        AddCheck("Inverse", () => (string?)O.El.Attribute("data-plate") == "black",
+            v =>
+            {
+                // white glyphs on a black plate the size of the text box —
+                // one object, nothing to keep aligned
+                SetAttr(O, "fill", v ? "white" : null, "inverse text");
+                SetAttr(O, "data-plate", v ? "black" : null, "inverse text");
+            },
+            hint: "white text on a black plate (\"MASTER LOAD\"); the plate is the text box — give it a Width/Height for padding");
         AddCombo("Font", InstalledFonts(), () => O.FontFamily,
             v => SetAttr(O, "font-family", v == "" ? null : v, "set font"), editable: true);
         AddPt("Font size", () => O.GetNum("font-size", 12),
@@ -394,6 +415,9 @@ public sealed class InspectorPanel : UserControl
             {
                 if (v == "") return;
                 SetAttr(O, "data-barcode", v, "set symbology");
+                // data-symsize is read per symbology ("16x48" means nothing
+                // to a QR) — a symbology change drops it
+                SetAttr(O, "data-symsize", null, "set symbology");
                 // deferred: the rebuild swaps out the combo raising this event
                 BeginInvoke(new Action(Reshape));
             });
@@ -406,10 +430,33 @@ public sealed class InspectorPanel : UserControl
                 : null);
 
         if (sym is "code128" or "code39" or "code39ext" or "gs1-128" or "itf14")
+        {
             AddCombo("HRI", new[] { "", "none", "below", "above" },
                 () => (string?)O.El.Attribute("data-hri") ?? "",
-                v => SetAttr(O, "data-hri", v == "" ? null : v, "set hri"),
+                v =>
+                {
+                    SetAttr(O, "data-hri", v == "" ? null : v, "set hri");
+                    BeginInvoke(new Action(Reshape));   // the rows below come and go
+                },
                 hint: "human-readable text inside the box, under or above the bars; empty = none");
+            if ((string?)O.El.Attribute("data-hri") is "below" or "above")
+            {
+                AddPt("HRI size", () => O.GetNum("data-hri-size", 0),
+                    v => SetAttr(O, "data-hri-size", v <= 0 ? null : N(v), "set hri size"),
+                    allowEmpty: true,
+                    hint: "text height; empty = automatic (a quarter of the box, at most 0.15 in). The bars give up that much of the box");
+                AddCombo("HRI align", new[] { "center", "left", "right" },
+                    () => (string?)O.El.Attribute("data-hri-align") ?? "center",
+                    v => SetAttr(O, "data-hri-align", v == "center" ? null : v, "set hri align"));
+                AddCombo("HRI font", InstalledFonts(),
+                    () => (string?)O.El.Attribute("data-hri-font") ?? "",
+                    v => SetAttr(O, "data-hri-font", v == "" ? null : v, "set hri font"),
+                    editable: true, hint: "empty = Arial; OCR-B if the spec asks for it and the font is installed");
+                AddLen("HRI gap", () => O.GetNum("data-hri-gap", 0),
+                    v => SetAttr(O, "data-hri-gap", v <= 0 ? null : N(v), "set hri gap"),
+                    allowEmpty: true, hint: "clear space between the bars and the text; taken from the bars");
+            }
+        }
 
         // live feedback for symbologies whose encoding transforms or
         // validates the value — otherwise a wrong value silently shows the
@@ -433,9 +480,47 @@ public sealed class InspectorPanel : UserControl
                     ? "✓ valid — encodes FNC1 + AI stream"
                     : "✗ expected (01)09501101530003(10)LOT42 style (fixed-length AIs must match their defined length)";
             }, hint: "parenthesized GS1 Application Identifiers; separators are handled for you");
-        AddNum("Module mils", () => O.GetNum("data-module-mils"),
+        // module size: a MINIMUM for the feasibility check by default; with
+        // "Exact module" the symbol is drawn at exactly this X-dim, centered
+        // in the box, whatever the content length (spec fidelity)
+        AddLen("Module", () => O.GetNum("data-module-mils"),
             v => SetAttr(O, "data-module-mils", v <= 0 ? null : N(v), "set module mils"),
-            allowEmpty: true);
+            allowEmpty: true,
+            hint: "X-dimension (narrowest bar / one cell). Empty = whatever fills the box. Without Exact module it is a minimum the printer check enforces");
+        bool exact0 = (string?)O.El.Attribute("data-module-lock") == "1";
+        AddCheck("Exact module", () => (string?)O.El.Attribute("data-module-lock") == "1",
+            v =>
+            {
+                SetAttr(O, "data-module-lock", v ? "1" : null, "set exact module");
+                if (v && O.GetNum("data-module-mils") <= 0)
+                {
+                    // seed from what the box gives today so the symbol does not jump
+                    double m0 = CurrentModule(sym);
+                    if (m0 > 0) SetAttr(O, "data-module-mils", N(Math.Round(m0, 2)), "set module mils");
+                }
+                BeginInvoke(new Action(Reshape));
+            },
+            hint: "draw at exactly this module size, centered in the box, whatever the content; content too long for the box falls back to filling it");
+        if (exact0)
+            AddButtons(("Box from module", () =>
+            {
+                // width/height = modules × module for the current sample, and
+                // lock the size — the box is then the printed size
+                double m = O.GetNum("data-module-mils");
+                if (m <= 0) return;
+                var (cols, rows) = ModuleCounts(sym);
+                if (cols <= 0) return;
+                var changes = new List<(string, string?, string?)>
+                {
+                    ("width", (string?)O.El.Attribute("width"), N(cols * m)),
+                    ("data-lock-size", (string?)O.El.Attribute("data-lock-size"), "1"),
+                    ("data-tight", (string?)O.El.Attribute("data-tight"), null),
+                };
+                if (rows > 0)   // 2D: height follows too; linear keeps its bar height
+                    changes.Add(("height", (string?)O.El.Attribute("height"), N(rows * m)));
+                Push(EditCommand.SetAttrs(O.El, changes, "box from module"));
+                BeginInvoke(new Action(Reshape));
+            }));
         if (sym == "datamatrix")
             AddCheck("Rectangular", () => (string?)O.El.Attribute("data-dmshape") == "rect",
                 v =>
@@ -452,7 +537,8 @@ public sealed class InspectorPanel : UserControl
                 () => (string?)O.El.Attribute("data-ecc") ?? "",
                 v => SetAttr(O, "data-ecc", v == "" ? null : v, "set rmqr ecc"),
                 hint: "error correction level; empty = M. The symbol version follows the box aspect automatically.");
-        if (sym is "qr" or "datamatrix" or "aztec" or "rmqr")
+        bool locked = (string?)O.El.Attribute("data-lock-size") == "1";
+        if (sym is ("qr" or "datamatrix" or "aztec" or "rmqr") && !locked)
             AddCheck("Tight box", () => (string?)O.El.Attribute("data-tight") == "1",
                 v =>
                 {
@@ -462,6 +548,60 @@ public sealed class InspectorPanel : UserControl
                         Push(O.Resize(r, _measurer));
                 },
                 hint: "keep the box snapped to the symbol's exact drawn size after every resize");
+        // data-symsize: pin the symbol grid, whatever the content (a spec
+        // that shows a "2×2" Data Matrix, a fixed QR version, …). Choices
+        // and the stored value are per symbology; the renderer reads it.
+        (string[] Choices, Func<string, string> Store, Func<string, string> Show, string Hint)? ss = sym switch
+        {
+            "datamatrix" => (Etiq.Core.DataMatrix.SquareSizes.Select(n => $"{n}x{n}")
+                                .Concat(Etiq.Core.DataMatrix.RectNames.Select(r => r + " (rect)")).ToArray(),
+                v => v.EndsWith(" (rect)") ? v[..^7] : v.Split('x')[0],
+                v => v.Contains('x') ? v + " (rect)" : $"{v}x{v}",
+                "square: pad to at least this ECC200 size — 32x32 and up print as 2×2 regions (the internal cross), 64x64 and up as 4×4. " +
+                "rect: force that rectangular format"),
+            "qr" => (Enumerable.Range(1, 40).Select(v => $"v{v} ({17 + 4 * v}x{17 + 4 * v})").ToArray(),
+                v => v[1..v.IndexOf(' ')], v => $"v{v} ({17 + 4 * int.Parse(v)}x{17 + 4 * int.Parse(v)})",
+                "pad to at least this QR version"),
+            "aztec" => (Etiq.Core.Aztec.Sizes.Select(n => $"{n}x{n}").ToArray(),
+                v => v.Split('x')[0], v => $"{v}x{v}",
+                "pad to at least this many modules per side"),
+            "rmqr" => (Etiq.Core.Rmqr.VersionNames.Select(n => "R" + n).ToArray(),
+                v => v[1..], v => "R" + v,
+                "force this rMQR version; content that won't fit falls back to the best fit for the box"),
+            "pdf417" => (Enumerable.Range(3, 88).Select(n => $"{n} rows").ToArray(),
+                v => v.Split(' ')[0], v => $"{v} rows",
+                "pad to at least this many rows (columns are set above)"),
+            _ => null,
+        };
+        if (ss is { } sz)
+            AddCombo("Symbol size", new[] { "" }.Concat(sz.Choices).ToArray(),
+                () =>
+                {
+                    // a value from another symbology (hand-edited file, older
+                    // build) shows as "not set" rather than throwing
+                    if ((string?)O.El.Attribute("data-symsize") is not { } d) return "";
+                    try { string shown = sz.Show(d); return sz.Choices.Contains(shown) ? shown : ""; }
+                    catch (FormatException) { return ""; }
+                },
+                v =>
+                {
+                    SetAttr(O, "data-symsize", v == "" ? null : sz.Store(v), "set symbol size");
+                    if ((string?)O.El.Attribute("data-tight") == "1"
+                        && LabelRenderer.TightBarcodeRect(O, _measurer) is { } tr)
+                        Push(O.Resize(tr, _measurer));
+                },
+                hint: sz.Hint + "; empty = smallest that fits");
+        // pin the printed dimensions: no resize handles, no tight-box snap;
+        // Width/Height above are still the way to SET the size
+        AddCheck("Lock size", () => (string?)O.El.Attribute("data-lock-size") == "1",   // live, not the captured local
+            v =>
+            {
+                SetAttr(O, "data-lock-size", v ? "1" : null, "lock size");
+                if (v) SetAttr(O, "data-tight", null, "lock size");
+                BeginInvoke(new Action(Reshape));
+            },
+            hint: "keep this box at exactly the size set above: no resize handles, no tight-box snapping");
+        AddInfo("Prints as", PrintedSizeInfo(sym));
 
         if (sym == "qr")
         {
@@ -612,11 +752,119 @@ public sealed class InspectorPanel : UserControl
                 hint: "empty = FILL (auto-scale to the safe limit); 25-130 = manual % of the reserved box");
     }
 
-    private string? PickLogoFile(string? baseDir)
+    // ---- <image> rows: source (path / URL / embedded) like the QR logo,
+    // plus fit and black-and-white ----
+    private string CurImage() => LabelRenderer.ImageHref(O) ?? "";
+    private void SetImage(string? v, string what)
+    {
+        // write SVG 2 `href`; drop a legacy xlink:href so there is one source
+        // ("{ns}local" is XName's string form — SetAttrs takes string names)
+        const string xl = "{http://www.w3.org/1999/xlink}href";
+        Push(EditCommand.SetAttrs(O.El, new()
+        {
+            ("href", (string?)O.El.Attribute("href"), v),
+            (xl, (string?)O.El.Attribute(XName.Get(xl)), null),
+        }, what));
+    }
+
+    private void BuildImageRows()
+    {
+        AddHeader("Image");
+        bool embedded0 = CurImage().StartsWith("data:", StringComparison.OrdinalIgnoreCase);
+        if (!embedded0)
+        {
+            AddText("Source", CurImage,
+                v => { if (v != "") { SetImage(v, "set image source"); BeginInvoke(new Action(Reshape)); } },
+                hint: "image file path (absolute, or relative to the label file) or an http(s) URL");
+            AddButtons(
+                ("Browse…", () =>
+                {
+                    string? picked = PickLogoFile(BaseDir(), "Choose image");
+                    if (picked is null) return;
+                    SetImage(picked, "set image source");
+                    BeginInvoke(new Action(Reshape));
+                }),
+                ("Embed into template", () =>
+                {
+                    var bytes = LabelRenderer.FetchLogoBytes(CurImage(), BaseDir());
+                    if (bytes is null)
+                    {
+                        MessageBox.Show(FindForm(), "Could not read the image from its source.", "Embed");
+                        return;
+                    }
+                    if (bytes.Length > 256 * 1024 && MessageBox.Show(FindForm(),
+                            $"The image is {bytes.Length / 1024} KB — embedding grows the label file by ~{bytes.Length * 4 / 3 / 1024} KB. Continue?",
+                            "Embed", MessageBoxButtons.OKCancel) != DialogResult.OK)
+                        return;
+                    SetImage($"data:{SniffMime(bytes)};base64,{Convert.ToBase64String(bytes)}", "embed image");
+                    BeginInvoke(new Action(Reshape));
+                }));
+        }
+        else
+        {
+            int comma = CurImage().IndexOf(',');
+            int kb = comma > 0 ? (CurImage().Length - comma) * 3 / 4 / 1024 : 0;
+            AddButtons(($"Extract… (embedded, ~{Math.Max(1, kb)} KB)", () =>
+            {
+                string? baseDir = BaseDir();
+                var bytes = LabelRenderer.FetchLogoBytes(CurImage(), baseDir);
+                if (bytes is null) return;
+                using var dlg = new SaveFileDialog
+                {
+                    Title = "Extract embedded image",
+                    FileName = "image" + ExtFor(SniffMime(bytes)),
+                    Filter = "Image|*.png;*.jpg;*.jpeg;*.gif;*.bmp|All files|*.*",
+                    InitialDirectory = baseDir ?? "",
+                };
+                if (dlg.ShowDialog(FindForm()) != DialogResult.OK) return;
+                try
+                {
+                    File.WriteAllBytes(dlg.FileName, bytes);
+                    if (MessageBox.Show(FindForm(),
+                            "Point the template at the extracted file instead of the embedded copy?",
+                            "Extract", MessageBoxButtons.YesNo) == DialogResult.Yes)
+                    {
+                        SetImage(Relativize(dlg.FileName, baseDir), "set image source");
+                        BeginInvoke(new Action(Reshape));
+                    }
+                }
+                catch (Exception ex) { MessageBox.Show(FindForm(), ex.Message, "Extract failed"); }
+            }));
+        }
+        AddCombo("Fit", new[] { "keep aspect", "stretch" },
+            () => (string?)O.El.Attribute("preserveAspectRatio") == "none" ? "stretch" : "keep aspect",
+            v => SetAttr(O, "preserveAspectRatio", v == "stretch" ? "none" : null, "set image fit"),
+            hint: "keep aspect = largest size that fits the box, centered (SVG default); stretch = fill the box exactly");
+        // colour printers exist (ColorWorks, VC-500W…): the picture goes to
+        // the driver as-is unless a threshold is set
+        bool mono0 = O.GetNum("data-threshold", 0) is > 0 and < 100;
+        AddCheck("Black & white", () => O.GetNum("data-threshold", 0) is > 0 and < 100,
+            v =>
+            {
+                SetAttr(O, "data-threshold", v ? "50" : null, "set image threshold");
+                BeginInvoke(new Action(Reshape));
+            },
+            hint: "threshold every pixel to black or white — crisp logos on monochrome thermal printers, no driver dithering; off = the picture as is (colour printers print colour)");
+        if (mono0)
+            AddNum("Threshold %", () => O.GetNum("data-threshold", 50),
+                v => SetAttr(O, "data-threshold", ((int)Math.Clamp(v, 1, 99)).ToString(), "set image threshold"),
+                step: 5, hint: "luminance cut: pixels darker than this % print black, lighter print white. Lower = less black (thin/light logos), higher = more black");
+        AddButtons(("Box from image aspect", () =>
+        {
+            // keep the width, set the height from the pixel aspect
+            var img = LabelRenderer.LoadImage(CurImage(), BaseDir());
+            if (img is null || img.Width == 0) return;
+            double w = O.GetNum("width");
+            SetAttr(O, "height", N(w * img.Height / img.Width), "fit image box");
+        }));
+        AddInfo("Pixels", LabelRenderer.LoadImage(CurImage(), BaseDir()) is { } im ? $"{im.Width} × {im.Height}" : "(not readable)");
+    }
+
+    private string? PickLogoFile(string? baseDir, string title = "Choose logo image")
     {
         using var dlg = new OpenFileDialog
         {
-            Title = "Choose logo image",
+            Title = title,
             Filter = "Images|*.png;*.jpg;*.jpeg;*.gif;*.bmp|All files|*.*",
             InitialDirectory = baseDir ?? "",
         };
@@ -903,6 +1151,88 @@ public sealed class InspectorPanel : UserControl
             step: Units.MilsPerPt, allowEmpty: allowEmpty, hint: hint,
             fmt: Units.FormatPoints,
             parse: t => Units.TryParsePoints(t, out double m) ? m : null);
+    }
+
+    /// <summary>"Prints as" readout for a barcode: the drawn extent, and
+    /// for 2D codes the symbol grid and module size — with a warning when
+    /// the module isn't a whole number of printer dots (that is what makes
+    /// a Data Matrix print fuzzy on a thermal head).</summary>
+    /// <summary>Sample content the inspector sizes against (the fixed
+    /// value, else the field name as a stand-in).</summary>
+    private string SampleContent() =>
+        (string?)O.El.Attribute("data-value") ?? (string?)O.El.Attribute("data-field") ?? "SAMPLE";
+
+    /// <summary>Module grid of the sample: (cols, rows) for 2D; (modules, 0)
+    /// for linear — height is free; (0, 0) when not encodable.</summary>
+    private (int Cols, int Rows) ModuleCounts(string sym)
+    {
+        var b = O.Bounds(_measurer);
+        if (sym is "qr" or "datamatrix" or "aztec" or "rmqr" or "pdf417")
+        {
+            var m = LabelRenderer.TryEncodeMatrix(sym, SampleContent(),
+                (string?)O.El.Attribute("data-ecc"), (int)O.GetNum("data-columns", 0), 1,
+                (string?)O.El.Attribute("data-dmshape") == "rect", b.H > 0 ? b.W / b.H : 0,
+                (string?)O.El.Attribute("data-symsize"));
+            return m is null ? (0, 0) : (m.GetLength(1), m.GetLength(0));
+        }
+        var mods = LabelRenderer.TryEncode(sym, SampleContent());
+        if (mods is null) return (0, 0);
+        int total = 0;
+        foreach (var w in mods) total += w;
+        return (total, 0);
+    }
+
+    /// <summary>The module size the box gives the sample today (mils).</summary>
+    private double CurrentModule(string sym)
+    {
+        var b = O.Bounds(_measurer);
+        var (cols, rows) = ModuleCounts(sym);
+        if (cols <= 0 || b.W <= 0) return 0;
+        return rows > 0 ? Math.Min(b.W / cols, b.H / rows) : b.W / cols;
+    }
+
+    private string PrintedSizeInfo(string sym)
+    {
+        var b = O.Bounds(_measurer);
+        if (b.W <= 0 || b.H <= 0) return "—";
+        double locked = LabelRenderer.ModuleLock(O);
+        if (sym is not ("qr" or "datamatrix" or "aztec" or "rmqr"))
+        {
+            if (locked > 0)
+            {
+                var (mods1, _) = ModuleCounts(sym);
+                if (mods1 <= 0) return "(sample not encodable)";
+                double w1 = mods1 * locked;
+                return w1 <= b.W + 0.01
+                    ? $"{UnitPrefs.FS(w1)} × {UnitPrefs.FS(b.H)}, {mods1} modules at {UnitPrefs.FS(locked)} (exact), centered"
+                    : $"needs {UnitPrefs.FS(w1)} at {UnitPrefs.FS(locked)}/module — wider than the box, fills the box instead";
+            }
+            return $"{UnitPrefs.FS(b.W)} × {UnitPrefs.FS(b.H)} (fills the box)";
+        }
+        string content = SampleContent();
+        var m = LabelRenderer.TryEncodeMatrix(sym, content,
+            (string?)O.El.Attribute("data-ecc"), 0, 1,
+            (string?)O.El.Attribute("data-dmshape") == "rect", b.W / b.H,
+            (string?)O.El.Attribute("data-symsize"));
+        if (m is null) return $"{UnitPrefs.FS(Math.Min(b.W, b.H))} square (sample not encodable)";
+        int rows = m.GetLength(0), cols = m.GetLength(1);
+        double module = Math.Min(b.W / cols, b.H / rows);      // mils, square modules
+        string exact = "";
+        if (locked > 0)
+        {
+            if (cols * locked <= b.W + 0.01 && rows * locked <= b.H + 0.01) { module = locked; exact = " (exact)"; }
+            else exact = $" — {UnitPrefs.FS(locked)} exact does not fit ({UnitPrefs.FS(cols * locked)} × {UnitPrefs.FS(rows * locked)} needed), filling instead";
+        }
+        string s = $"{UnitPrefs.FS(cols * module)} × {UnitPrefs.FS(rows * module)}, {cols}×{rows} modules, {UnitPrefs.FS(module)}/module{exact}";
+        double dpmm = UnitPrefs.DotsPerMm;
+        if (dpmm > 0)
+        {
+            double dots = module / Etiq.Editor.Core.Units.DotPitchMils(dpmm);
+            s += Math.Abs(dots - Math.Round(dots)) < 0.02
+                ? $" = {Math.Round(dots)} dots"
+                : $" = {dots:0.00} dots — not whole dots, will print fuzzy; use {UnitPrefs.FS(Math.Floor(dots) * Etiq.Editor.Core.Units.DotPitchMils(dpmm) * cols)} wide";
+        }
+        return s;
     }
 
     /// <summary>Element-level Clear behavior (docs/convention.md

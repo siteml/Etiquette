@@ -166,11 +166,12 @@ implementation internals. How each maps onto this design:
 | Reset at limit (with reset target) | **new concept**: `<etiq:reset at="…" to="…"/>` rules |
 | Reset per job / per record / on data change / on schedule (day/month/year) / manual | same reset-rule vocabulary: `every="job"`, `change:Field`, `schedule="day\|month\|year"`, plus a manual reset in the counters UI |
 | Remembers position between jobs, incl. remaining interval at step > 1 | counter provider persistence (store position, not last-printed) |
+| Serial value lives in the document: advances in memory per job, persists across sessions ONLY if the document is saved after printing ("Save changes to document after each print job"), else restarts from the stored value on reopen | **new concept**: counter *scope* — `scope="store"` (shared/persistent provider, the default for production) vs `scope="session"` (in-memory, seeded from the template's `start=`, forgotten on close) — the per-session case the corpus mostly uses today |
 | Global counters (System Database; network-shared) | shared providers: epicor-fn / rest / central counter — strictly stronger |
 | Serials-per-job × copies-per-serial | series `count=` × panel copies/collation |
 | Decoration (prefixes, dashes, date+serial in one object) | compose — already covered |
 
-Net-new items for the schema from this table: `advance=`, reset rules,
+Net-new items for the schema from this table: counter `scope=`, `advance=`, reset rules,
 `alphabet=` options (lowercase, exclusions), preserve-width rollover,
 negative step. All fit the provider/row model without touching the
 manifest/record core.

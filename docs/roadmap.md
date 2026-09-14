@@ -1,9 +1,27 @@
 # Roadmap
 
-Where Etiquette is and where it's going. Current release: **v0.11.0**
+Where Etiquette is and where it's going. Current release: **v0.12.0**
 (see the Releases page; `etiqedit` checks it via Help → Check for Updates).
 
 Legend: `[x]` done · `[~]` partially done · `[ ]` not started.
+
+## Shipped — v0.12.0
+
+- [x] **Print-spec fidelity** — inverse text (`data-plate` + white fill),
+      symbol size pinned on every 2D code (`data-symsize`), lock size,
+      exact module size (`data-module-lock`), "Prints as" readout.
+- [x] **Images** — `<image>` objects: file / URL / embedded, fit,
+      optional black & white threshold; Insert → Image… and drag & drop.
+- [x] **HRI** size / align / font / gap controls.
+- [x] **Override boxes can be blanked** — prefilled with the fetch, the
+      box is the value once edited; ↺ and Clear restore.
+- [x] Metadata namespace → `urn:etiquette:label:0.1` (legacy URI read
+      and upgraded on load).
+- [x] Drag & drop (templates onto the window — or the empty canvas —
+      images onto the canvas);
+      Shift keeps aspect while resizing; per-drag undo steps; resize
+      cursors; selection wins over guides; vertical ruler labels; Edit
+      shortcuts always fire.
 
 ## Shipped — v0.11.0
 
@@ -178,8 +196,10 @@ The suite is usable end to end for the design → data → print loop:
 - [ ] Rotate handle drag, line endpoint handles, rotated-resize snapping
       (rotated objects are also skipped by Snap All to Grid until then)
 - [ ] Marquee touch-select and multi-object resize
-- [ ] Layer dimming; add-object palette
-- [ ] HRI rendering on canvas; `data-overflow="wrap"`
+- [ ] Layer dimming; add-object palette (Insert menu covers text, barcode,
+      line, box, image today)
+- [ ] Data-bound image choice (`data-field` on `<image>` via a lookup map)
+- [ ] `data-overflow="wrap"`
 - [ ] Connections editor; Epicor context for printing from the editor
 - [ ] "Merge line stack" inverse; live compose preview
 - [ ] `tspan` export; production counter store

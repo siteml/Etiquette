@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Ships with Etiquette. Insert, then re-point the helper fields' sources
      at your data (e.g. source="list" list="Customers" column="City"). -->
-<etiq:snippet xmlns:etiq="https://etiquette.dev/ns/0.1"
+<etiq:snippet xmlns:etiq="urn:etiquette:label:0.1"
               name="Address Block (US)"
               description="Street / Address2 / City, ST ZIP - blank lines collapse, no dangling commas">
   <etiq:field name="AddrStreet" source="prompt" caption="Street:"/>

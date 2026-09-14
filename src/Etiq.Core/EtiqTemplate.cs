@@ -10,7 +10,35 @@ namespace Etiq.Core;
 public sealed class EtiqTemplate
 {
     public static readonly XNamespace Svg = "http://www.w3.org/2000/svg";
-    public static readonly XNamespace Ns = "https://etiquette.dev/ns/0.1";
+    /// <summary>The etiq: metadata namespace. A URN — an identifier, not
+    /// an address — so it implies no domain anyone has to own.</summary>
+    public static readonly XNamespace Ns = "urn:etiquette:label:0.1";
+    /// <summary>Namespace written by releases before 0.12. Read forever;
+    /// rewritten to <see cref="Ns"/> on load so everything downstream sees
+    /// one namespace, and the next save writes the current one.</summary>
+    public static readonly XNamespace LegacyNs = "https://etiquette.dev/ns/0.1";
+
+    /// <summary>Move every element and xmlns declaration in the legacy
+    /// namespace to the current one, in place. True when anything moved.</summary>
+    public static bool UpgradeNamespace(XDocument doc)
+    {
+        bool moved = false;
+        foreach (var el in doc.Descendants().Where(e => e.Name.Namespace == LegacyNs).ToList())
+        {
+            el.Name = Ns + el.Name.LocalName; moved = true;
+        }
+        foreach (var a in doc.Descendants().Attributes()
+                     .Where(a => a.IsNamespaceDeclaration && a.Value == LegacyNs.NamespaceName).ToList())
+        {
+            var owner = a.Parent!; var name = a.Name;
+            a.Remove(); owner.SetAttributeValue(name, Ns.NamespaceName); moved = true;
+        }
+        return moved;
+    }
+
+    /// <summary>True when the file carried the pre-0.12 namespace (it has
+    /// been upgraded in memory; saving writes the current one).</summary>
+    public bool LegacyNamespace { get; private set; }
     // iqr removed: Denso Wave never published the iQR spec openly (unlike
     // QR/ISO 18004) and no open decoder exists — unimplementable AND
     // unverifiable. Rectangular needs are covered by DataMatrix rect
@@ -343,6 +371,7 @@ public sealed class EtiqTemplate
     {
         Path = path;
         Doc = doc;
+        LegacyNamespace = UpgradeNamespace(doc);
         var root = doc.Root!;
         WidthAttr = (string?)root.Attribute("width");
         HeightAttr = (string?)root.Attribute("height");

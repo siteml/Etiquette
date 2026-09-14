@@ -54,6 +54,15 @@ public sealed class MainForm : Form
     /// never shows a half-typed key, and a re-commit retries a failed
     /// lookup. Every other prompt is live.</summary>
     private readonly Dictionary<string, string> _committed = new();
+    // override= boxes (docs/data-flow.md §4): the box is PREFILLED with the
+    // fetched value as real text and only an EDITED box is submitted to
+    // the resolve — so the operator can blank a fetched value. ↺ restores.
+    private readonly HashSet<string> _overrideFields = new();
+    private readonly HashSet<string> _overrideEdited = new();
+    private readonly Dictionary<string, Button> _overrideReset = new();
+    private bool _seeding;              // programmatic box text: no edit, no recompute
+    private Font? _fetchedFont;
+    private readonly ToolTip _tips = new();
     // entered data survives panel rebuilds (mode flips, F4 Apply) — the
     // operator's entries belong to the SESSION, not to the panel instance.
     // Cleared when another file is opened.
@@ -166,6 +175,93 @@ public sealed class MainForm : Form
         // never lose work silently: closing with unsaved changes prompts
         // (station mode can't edit, so it never triggers this)
         FormClosing += (_, e) => { if (!ConfirmDiscard()) e.Cancel = true; };
+
+        WireDragDrop();
+    }
+
+    // ---- drag & drop (QoL): an .svg dropped on the window = open it as
+    // the template (an SVG is ambiguous — image or template — so the
+    // canvas is the one place that does NOT open it); a PNG/JPG/GIF/BMP
+    // dropped on the CANVAS = placed as an <image> at the drop point, and
+    // dropped anywhere else = placed centered ----
+    private void WireDragDrop()
+    {
+        static string[] Files(DragEventArgs e) =>
+            e.Data?.GetData(DataFormats.FileDrop) is string[] f ? f : Array.Empty<string>();
+        static bool IsImage(string p) => ImageExts.Contains(Path.GetExtension(p).ToLowerInvariant());
+        static bool IsSvg(string p) => Path.GetExtension(p).Equals(".svg", StringComparison.OrdinalIgnoreCase);
+        // a TEMPLATE carries the etiq:label metadata block; a plain
+        // graphical SVG (Inkscape drawing, logo export) does not
+        static bool IsTemplate(string p)
+        {
+            try
+            {
+                using var r = new StreamReader(p);
+                var buf = new char[64 * 1024];
+                int n = r.Read(buf, 0, buf.Length);
+                string head = new string(buf, 0, n);
+                return head.Contains(EtiqTemplate.Ns.NamespaceName, StringComparison.Ordinal)
+                    || head.Contains(EtiqTemplate.LegacyNs.NamespaceName, StringComparison.Ordinal);
+            }
+            catch { return false; }
+        }
+
+        void Enter(object? _, DragEventArgs e) =>
+            e.Effect = !_stationLocked && Files(e).Any(f => IsSvg(f) || IsImage(f)) ? DragDropEffects.Copy : DragDropEffects.None;
+
+        // everything but the canvas: templates open, images get placed centered
+        foreach (Control c in new Control[] { this, _menuStrip!, _toolStrip!, _outline, _props, _status })
+        {
+            c.AllowDrop = true;
+            c.DragEnter += Enter;
+            c.DragDrop += (_, e) =>
+            {
+                var files = Files(e);
+                // window drop: templates open; a plain SVG opens too (a valid
+                // starting canvas) — the canvas is the one place that refuses it
+                if (files.FirstOrDefault(IsSvg) is { } svg) { OpenDropped(svg); return; }
+                foreach (var img in files.Where(IsImage)) InsertImageFile(img, null);
+            };
+        }
+        _canvas.AllowDrop = true;
+        _canvas.DragEnter += Enter;
+        _canvas.DragDrop += (_, e) =>
+        {
+            var files = Files(e);
+            var imgs = files.Where(IsImage).ToList();
+            if (imgs.Count > 0)
+            {
+                if (_doc is null) { MessageBox.Show(this, "Create or open a label first (File → New / Open).", "No document"); return; }
+                if (_canvas.Mode != EditorMode.Design) { MessageBox.Show(this, "Switch to Design mode to add objects.", "Data mode is locked"); return; }
+                var at = _canvas.WorldAt(_canvas.PointToClient(new Point(e.X, e.Y)));
+                foreach (var img in imgs) InsertImageFile(img, at);
+                return;
+            }
+            // an SVG on the canvas. A template (etiq:label metadata) opens —
+            // straight away with no document, after a prompt with one open,
+            // since the drop might have meant "place this". A plain graphical
+            // SVG can't be placed: there is no SVG rasterizer in the print
+            // path — say so rather than opening a logo as a label.
+            if (files.FirstOrDefault(IsSvg) is not { } svg) return;
+            if (!IsTemplate(svg))
+            {
+                MessageBox.Show(this,
+                    $"{Path.GetFileName(svg)} is a drawing, not an Etiquette template, and SVG pictures can't be placed on a label yet.\n\n" +
+                    "Export it as a PNG (Inkscape: File → Export) and drop that instead — or open it from File → Open to use it as a starting point.",
+                    "Drop");
+                return;
+            }
+            if (_doc is null ||
+                MessageBox.Show(this, $"Open {Path.GetFileName(svg)} as the template?\n\n(To place a picture, drop a PNG/JPG.)",
+                    "Drop", MessageBoxButtons.OKCancel) == DialogResult.OK)
+                OpenDropped(svg);
+        };
+    }
+
+    private void OpenDropped(string path)
+    {
+        if (_stationLocked || !ConfirmDiscard()) return;
+        OpenFile(path);
     }
 
     /// <summary>Pick + offer the right download for an available update.
@@ -620,18 +716,23 @@ public sealed class MainForm : Form
 
         var edit = new ToolStripMenuItem("&Edit");
         // Undo.Changed already runs OutlineMaybeRefresh — only the canvas needs a poke
+        // shortcut items guard THEMSELVES: Enabled is only a display state
+        // while the menu is open (see DropDownClosed below) — a shortcut
+        // must never be blocked by an Enabled=false left over from the
+        // last time the menu was opened
+        bool Design() => _doc is not null && !_modeButton.Checked;
         var miUndo = (ToolStripMenuItem)edit.DropDownItems.Add(
-            "&Undo", null, (_, _) => { _doc?.Undo.Undo(); _canvas.Invalidate(); });
+            "&Undo", null, (_, _) => { if (Design()) { _doc!.Undo.Undo(); _canvas.Invalidate(); } });
         miUndo.ShortcutKeys(Keys.Control | Keys.Z);
         var miRedo = (ToolStripMenuItem)edit.DropDownItems.Add(
-            "&Redo", null, (_, _) => { _doc?.Undo.Redo(); _canvas.Invalidate(); });
+            "&Redo", null, (_, _) => { if (Design()) { _doc!.Undo.Redo(); _canvas.Invalidate(); } });
         miRedo.ShortcutKeys(Keys.Control | Keys.Y);
         edit.DropDownItems.Add(new ToolStripSeparator());
         var miGroup = (ToolStripMenuItem)edit.DropDownItems.Add(
-            "&Group", null, (_, _) => GroupSelection());
+            "&Group", null, (_, _) => { if (Design()) GroupSelection(); });
         miGroup.ShortcutKeys(Keys.Control | Keys.G);
         var miUngroup = (ToolStripMenuItem)edit.DropDownItems.Add(
-            "U&ngroup", null, (_, _) => UngroupSelection());
+            "U&ngroup", null, (_, _) => { if (Design()) UngroupSelection(); });
         miUngroup.ShortcutKeys(Keys.Control | Keys.Shift | Keys.G);
         edit.DropDownItems.Add(new ToolStripSeparator());
         var miFields = (ToolStripMenuItem)edit.DropDownItems.Add(
@@ -639,10 +740,10 @@ public sealed class MainForm : Form
         miFields.ShortcutKeys(Keys.F4);
         edit.DropDownItems.Add(new ToolStripSeparator());
         var miFwd = (ToolStripMenuItem)edit.DropDownItems.Add(
-            "Bring &Forward", null, (_, _) => Reorder(true));
+            "Bring &Forward", null, (_, _) => { if (Design() && _canvas.Selected is not null) Reorder(true); });
         miFwd.ShortcutKeys(Keys.Control | Keys.Oemplus);
         var miBack = (ToolStripMenuItem)edit.DropDownItems.Add(
-            "Send &Backward", null, (_, _) => Reorder(false));
+            "Send &Backward", null, (_, _) => { if (Design() && _canvas.Selected is not null) Reorder(false); });
         miBack.ShortcutKeys(Keys.Control | Keys.OemMinus);
         edit.DropDownItems.Add(new ToolStripSeparator());
         var miSnapAll = (ToolStripMenuItem)edit.DropDownItems.Add(
@@ -662,6 +763,15 @@ public sealed class MainForm : Form
             miFields.Enabled = doc;
             miFwd.Enabled = miBack.Enabled = design && _canvas.Selected is not null;
         };
+        // menu closed: re-arm every shortcut item. ToolStrip only routes a
+        // ShortcutKeys chord to an ENABLED item, and the gray-out above
+        // outlives the menu — Ctrl+Z / Ctrl+G "sometimes" dead was exactly
+        // an Edit menu last opened while nothing was undoable / selected
+        edit.DropDownClosed += (_, _) =>
+        {
+            miUndo.Enabled = miRedo.Enabled = miGroup.Enabled = miUngroup.Enabled =
+                miFields.Enabled = miFwd.Enabled = miBack.Enabled = true;
+        };
 
         var insert = new ToolStripMenuItem("&Insert");
         insert.DropDownItems.Add("&Text", null, (_, _) => InsertObject("text"));
@@ -675,6 +785,7 @@ public sealed class MainForm : Form
         insert.DropDownItems.Add(bc);
         insert.DropDownItems.Add("&Line", null, (_, _) => InsertObject("line"));
         insert.DropDownItems.Add("Bo&x", null, (_, _) => InsertObject("box"));
+        insert.DropDownItems.Add("&Image…", null, (_, _) => InsertImage());
         insert.DropDownItems.Add(new ToolStripSeparator());
         insert.DropDownItems.Add("La&yer…", null, (_, _) => InsertLayer());
         insert.DropDownOpening += (_, _) =>
@@ -874,7 +985,7 @@ public sealed class MainForm : Form
             <svg xmlns="http://www.w3.org/2000/svg"
                  width="{dlg.WidthAttr}" height="{dlg.HeightAttr}" viewBox="0 0 {w} {h}">
               <metadata>
-                <etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+                <etiq:label xmlns:etiq="urn:etiquette:label:0.1">
                 </etiq:label>
               </metadata>
               <g data-layer="Main">
@@ -1000,6 +1111,70 @@ public sealed class MainForm : Form
         _canvas.Select(EditorObject.Wrap(el));
     }
 
+    /// <summary>Insert → Image…: pick a file, drop an &lt;image&gt; sized
+    /// to the picture's aspect at about a third of the label width, source
+    /// kept template-relative when the file sits under the label's folder.</summary>
+    private void InsertImage()
+    {
+        if (_doc is null)
+        {
+            MessageBox.Show(this, "Create or open a label first (File → New / Open).", "No document");
+            return;
+        }
+        if (_canvas.Mode != EditorMode.Design)
+        {
+            MessageBox.Show(this, "Switch to Design mode to add objects.", "Data mode is locked");
+            return;
+        }
+        string? baseDir = _doc.Path is { } dp ? Path.GetDirectoryName(dp) : null;
+        using var dlg = new OpenFileDialog
+        {
+            Title = "Insert image",
+            Filter = "Images|*.png;*.jpg;*.jpeg;*.gif;*.bmp|All files|*.*",
+            InitialDirectory = baseDir ?? "",
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        InsertImageFile(dlg.FileName, null);
+    }
+
+    private static readonly string[] ImageExts = { ".png", ".jpg", ".jpeg", ".gif", ".bmp" };
+
+    /// <summary>Place an image file as an &lt;image&gt;: centered on the
+    /// label, or centered on `at` (a drop point). Source kept
+    /// template-relative when the file sits under the label's folder.</summary>
+    private void InsertImageFile(string file, PointD? at)
+    {
+        if (_doc is null || _canvas.Mode != EditorMode.Design) return;
+        string? baseDir = _doc.Path is { } dp ? Path.GetDirectoryName(dp) : null;
+        string spec = file;
+        if (baseDir is not null)
+        {
+            try
+            {
+                string rel = Path.GetRelativePath(baseDir, spec);
+                if (!rel.StartsWith("..") && !Path.IsPathRooted(rel)) spec = rel.Replace('\\', '/');
+            }
+            catch { /* keep absolute */ }
+        }
+        var img = LabelRenderer.LoadImage(spec, baseDir);
+        var vb = _canvas.Doc!.ViewBox;
+        double w = Math.Max(vb.W / 3, 300);
+        double h = img is { Width: > 0 } ? w * img.Height / img.Width : w;
+        double cx = at?.X ?? vb.X + vb.W / 2, cy = at?.Y ?? vb.Y + vb.H / 2;
+        var ns = _doc.Root.Name.Namespace;
+        var el = new System.Xml.Linq.XElement(ns + "image",
+            new System.Xml.Linq.XAttribute("x", Num.F(cx - w / 2)),
+            new System.Xml.Linq.XAttribute("y", Num.F(cy - h / 2)),
+            new System.Xml.Linq.XAttribute("width", Num.F(w)),
+            new System.Xml.Linq.XAttribute("height", Num.F(h)),
+            new System.Xml.Linq.XAttribute("href", spec));
+        _doc.AddObject(TargetLayer(), el, "insert image");
+        RefreshOutline();
+        _canvas.Select(EditorObject.Wrap(el));
+        if (img is null)
+            MessageBox.Show(this, "The image could not be read; the box is placed but shows a placeholder.", "Insert image");
+    }
+
     private void InsertLayer()
     {
         if (_doc is null) return;
@@ -1116,6 +1291,7 @@ public sealed class MainForm : Form
         _sources.Clear(); _listRowSets.Clear(); _listRowFails.Clear(); _listRowSig.Clear();                 // rows belong to the previous doc
         _canvas.Snapshot = PreviewSnapshot.Empty; _canvas.ShowDataValues = false;                      // so does the snapshot
         _panelMemoPrompts.Clear(); _panelMemoLists.Clear();               // so do the operator's entries
+        _overrideEdited.Clear();
         PushRecent(path);
         RefreshOutline();
         if (_modeButton.Checked) BuildDataPanel();
@@ -1197,8 +1373,10 @@ public sealed class MainForm : Form
     {
         if (_doc is null) return;
         using var measurer = new GdiTextMeasurer();
-        PrintService.Print(this, _doc, _canvas.HasSnapshot ? _canvas.Snapshot.Values : null, measurer);
+        var template = _canvas.HasSnapshot ? EtiqTemplate.Parse(_doc.Xml.ToString()) : null;
+        PrintService.Print(this, _doc, template is null ? null : ValuesForPrint(template), measurer);
         ShowPrintInfo();
+        if (template is not null && template.Fields.Any(f => f.Source == "serial")) _ = RefreshPreviewAsync(template);
     }
 
     /// <summary>Echo PrintService.LastInfo (paging diagnostics) where the
@@ -1232,11 +1410,26 @@ public sealed class MainForm : Form
     {
         if (_doc is null) return;
         using var measurer = new GdiTextMeasurer();
+        var template = EtiqTemplate.Parse(_doc.Xml.ToString());
         PrintService.PrintBatch(this, _doc,
-            new IReadOnlyDictionary<string, string>?[] { _canvas.Snapshot.Values }, measurer,
+            new IReadOnlyDictionary<string, string>?[] { ValuesForPrint(template) }, measurer,
             direct: panel.Print == "direct", printer: PanelPrinter(panel),
             copies: Math.Max(1, copies));
         ShowPrintInfo();
+        if (template.Fields.Any(f => f.Source == "serial")) _ = RefreshPreviewAsync(template);   // canvas → next serial
+    }
+
+    /// <summary>The values a print uses: the current snapshot, except that
+    /// serial fields (and anything composed over them) are re-resolved
+    /// with the counter RESERVED — the preview only ever peeked. Falls
+    /// back to the snapshot when nothing is serialized or the resolve
+    /// fails (the print then shows what the operator saw).</summary>
+    private IReadOnlyDictionary<string, string> ValuesForPrint(EtiqTemplate template)
+    {
+        var snap = _canvas.Snapshot.Values;
+        if (!template.Fields.Any(f => f.Source == "serial")) return snap;
+        try { return new FieldResolver(template, BuildResolveContext(reserve: true)).ResolveAll(); }
+        catch (Exception) { return snap; }
     }
 
     private void ShowMetadataDialog()
@@ -1826,6 +2019,24 @@ public sealed class MainForm : Form
     /// <summary>Put the caret in the first control that accepts entry
     /// (panel order) — Clear should leave the operator ready to type,
     /// not reaching for the mouse.</summary>
+    /// <summary>Fetched (untouched) override box: italic, muted blue;
+    /// operator-edited: the panel's normal text. Style, not words.</summary>
+    private void StyleOverrideBox(TextBox tb, bool edited)
+    {
+        _fetchedFont ??= new Font(_dataPanel.Font, FontStyle.Italic);
+        tb.Font = edited ? _dataPanel.Font : _fetchedFont;
+        tb.ForeColor = edited ? SystemColors.WindowText : Color.FromArgb(64, 96, 144);
+    }
+
+    /// <summary>An operator keystroke in an override= box: from now on the
+    /// box is the value (empty included) until ↺ or Clear.</summary>
+    private void MarkOverrideEdited(string field)
+    {
+        if (!_overrideFields.Contains(field) || !_overrideEdited.Add(field)) return;
+        if (_overrideReset.TryGetValue(field, out var undo)) undo.Enabled = true;
+        if (_promptBoxes.TryGetValue(field, out var tb)) StyleOverrideBox(tb, edited: true);
+    }
+
     private void FocusFirstInput()
     {
         _dataPanel.Controls.OfType<Control>()
@@ -1865,6 +2076,8 @@ public sealed class MainForm : Form
         _promptBoxes.Clear();
         _listCombos.Clear();
         _listDisplayToKey.Clear();
+        _overrideFields.Clear();
+        _overrideReset.Clear();
         if (_doc is null)
         {
             if (_stationLocked)   // locked with a missing template: say why
@@ -1968,7 +2181,12 @@ public sealed class MainForm : Form
                 // synchronously in Leave so a Print click that took the focus
                 // already sees the new value when its handler runs.
                 _committed[f.Name] = tb.Text;
-                tb.TextChanged += (_, _) => _canvas.Cleared = false;
+                tb.TextChanged += (_, _) =>
+                {
+                    if (_seeding) return;
+                    MarkOverrideEdited(f.Name);
+                    _canvas.Cleared = false;
+                };
                 tb.Leave += (_, _) => Commit(f.Name, tb.Text);
                 tb.KeyDown += (_, e) =>
                 {
@@ -1978,7 +2196,12 @@ public sealed class MainForm : Form
                 };
             }
             else
-                tb.TextChanged += (_, _) => Touched();
+                tb.TextChanged += (_, _) =>
+                {
+                    if (_seeding) return;
+                    MarkOverrideEdited(f.Name);   // BEFORE the recompute reads the boxes
+                    Touched();
+                };
             _promptBoxes[f.Name] = tb;
             _dataPanel.Controls.Add(tb);
             y += S(34);
@@ -2022,10 +2245,34 @@ public sealed class MainForm : Form
             else if (f.Source is ("epicor" or "rest") && f.Override)
                 inputs.Add(($"field:{f.Name}", () =>
                 {
-                    // overrideable pull: empty box = fetched value (shown as
-                    // ghost text once resolved); typing beats the pull
+                    // overrideable pull: the box is SEEDED with the fetched
+                    // value (real text, styled as fetched); once the operator
+                    // edits it the box is the value — empty included — and
+                    // ↺ goes back to the fetch. No words to translate: the
+                    // style says "from source", the arrow says "undo".
                     EmitPrompt(ff);
-                    _promptBoxes[ff.Name].PlaceholderText = "(from source)";
+                    var tb = _promptBoxes[ff.Name];
+                    _overrideFields.Add(ff.Name);
+                    tb.Width = S(270);
+                    var undo = new Button
+                    {
+                        Left = S(284), Top = tb.Top, Width = S(26), Height = tb.Height,
+                        Text = "\u21BA", TabStop = false,
+                        Enabled = _overrideEdited.Contains(ff.Name),
+                    };
+                    _tips.SetToolTip(undo, "Use the value from the source");
+                    undo.Click += (_, _) =>
+                    {
+                        _overrideEdited.Remove(ff.Name);
+                        undo.Enabled = false;
+                        _seeding = true;
+                        try { tb.Text = ""; } finally { _seeding = false; }   // refilled by the recompute
+                        StyleOverrideBox(tb, edited: false);
+                        Touched();
+                    };
+                    _overrideReset[ff.Name] = undo;
+                    StyleOverrideBox(tb, _overrideEdited.Contains(ff.Name));
+                    _dataPanel.Controls.Add(undo);
                 }));
             else if (f.Source == "list" && f.ListRef is { } lr &&
                      emittedLists.Add(lr) && listsByName.TryGetValue(lr, out var l) &&
@@ -2152,11 +2399,24 @@ public sealed class MainForm : Form
                         {
                             // docs/data-flow.md §6: reset the inputs, then ONE
                             // ordinary recompute — nothing special-cased
-                            foreach (var (name, tb) in _promptBoxes)
+                            _seeding = true;   // resets are not operator edits
+                            try
                             {
-                                var f = template.Fields.FirstOrDefault(f => f.Name == name && f.Source == "prompt");
-                                // per field: clear="blank" always empties; else back to default=
-                                tb.Text = f is null || f.ClearBlank ? "" : f.Default ?? "";
+                                foreach (var (name, tb) in _promptBoxes)
+                                {
+                                    var f = template.Fields.FirstOrDefault(f => f.Name == name && f.Source == "prompt");
+                                    // per field: clear="blank" always empties; else back to default=
+                                    tb.Text = f is null || f.ClearBlank ? "" : f.Default ?? "";
+                                }
+                            }
+                            finally { _seeding = false; }
+                            // override= boxes go back to "from source": the
+                            // recompute below refills them with the fetch
+                            _overrideEdited.Clear();
+                            foreach (var (name, undo) in _overrideReset)
+                            {
+                                undo.Enabled = false;
+                                if (_promptBoxes.TryGetValue(name, out var ob)) StyleOverrideBox(ob, edited: false);
                             }
                             // committed values follow the boxes: Clear IS a commit
                             foreach (var k in _committed.Keys.ToList())
@@ -2600,11 +2860,17 @@ public sealed class MainForm : Form
         finally { _fetchingSources.TryRemove(sourceName, out _); }
     }
 
+    /// <param name="reserve">true ONLY on a print path: serial counters are
+    /// reserved (advanced). Every preview / picker / sample resolve peeks —
+    /// the canvas shows the NEXT serial and typing never burns numbers.</param>
     private ResolveContext BuildResolveContext(Dictionary<string, string>? listOverride = null,
                                                bool remote = true,
-                                               IReadOnlyDictionary<string, string>? substitutes = null)
+                                               IReadOnlyDictionary<string, string>? substitutes = null,
+                                               bool reserve = false)
     {
         string counterFile = Path.Combine(Path.GetTempPath(), "etiqedit-preview-counters.json");
+        ICounterProvider counters = new LocalFileCounterProvider(counterFile);   // local serials (no Epicor ctx yet)
+        if (!reserve) counters = new PeekCounterProvider(counters);
         // parsed ONCE per context — the SourceColumn lambda runs per column
         var tmpl = _doc is not null && (_doc.Xml.Descendants(EtiqTemplate.Ns + "query").Any() ||
                                         _doc.Xml.Descendants(EtiqTemplate.Ns + "source").Any())
@@ -2613,8 +2879,12 @@ public sealed class MainForm : Form
         ctx = new ResolveContext
         {
             // fetch-feeding prompts contribute their COMMITTED value
-            PromptValues = _promptBoxes.ToDictionary(kv => kv.Key,
-                kv => _committed.TryGetValue(kv.Key, out var c) ? c : kv.Value.Text),
+            // an override= box is submitted ONLY once the operator edited it
+            // (present = the value, empty included; absent = fetch)
+            PromptValues = _promptBoxes
+                .Where(kv => !_overrideFields.Contains(kv.Key) || _overrideEdited.Contains(kv.Key))
+                .ToDictionary(kv => kv.Key,
+                    kv => _committed.TryGetValue(kv.Key, out var c) ? c : kv.Value.Text),
             ListSelections = listOverride ?? CurrentListSelections(),
             // snapshot: the resolve may run on a background task while a
             // fetch completion replaces a list's rows on the UI thread
@@ -2623,7 +2893,7 @@ public sealed class MainForm : Form
                 var snap = _listRowsLive.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<Dictionary<string, string>>)kv.Value);
                 return name => snap.GetValueOrDefault(name);
             }))(),
-            Counters = new LocalFileCounterProvider(counterFile),   // local serials (no Epicor ctx yet)
+            Counters = counters,
             EpicorColumn = _ => null,
             Rest = (_, _, _) => null,
             // the lambda runs after ctx is assigned — safe self-reference
@@ -2681,13 +2951,22 @@ public sealed class MainForm : Form
             foreach (var l in template.Lists)
                 if (_listCombos.TryGetValue(l.Name, out var cb) && ListNeedsRebuild(template, l, values))
                     RebuildListItems(template, l, cb);
-            // override= boxes: ghost text is the FETCHED value only — never the
-            // operator's own entry echoed back
-            foreach (var f in template.Fields)
-                if (f.Source is ("epicor" or "rest") && f.Override &&
-                    _promptBoxes.TryGetValue(f.Name, out var box) && box.Text == "")
-                    box.PlaceholderText = !snap.Values.TryGetValue(f.Name, out var rv) || rv == "" ? "(from source)"
-                        : standIns is not null && standIns.ContainsKey(f.Name) ? "•••••" : rv;
+            // override= boxes the operator has NOT edited show the FETCHED
+            // value as real text (redacted on screen like the canvas); an
+            // edited box is the operator's and is left alone
+            _seeding = true;
+            try
+            {
+                foreach (var name in _overrideFields)
+                {
+                    if (_overrideEdited.Contains(name) || !_promptBoxes.TryGetValue(name, out var box)) continue;
+                    string shown = !snap.Values.TryGetValue(name, out var rv) ? ""
+                        : standIns is not null && standIns.ContainsKey(name) ? "•••••" : rv;
+                    if (box.Text != shown) box.Text = shown;
+                    if (_committed.ContainsKey(name)) _committed[name] = shown;
+                }
+            }
+            finally { _seeding = false; }
             if (_dataStatus is not null)
             {
                 if (snap.HasErrors)
@@ -2745,7 +3024,7 @@ public sealed class MainForm : Form
             if (!row.TryGetValue(list.Key, out var key)) continue;
             var sel = CurrentListSelections();
             sel[list.Name] = key;
-            try { pages.Add(new FieldResolver(template, BuildResolveContext(sel)).ResolveAll()); }
+            try { pages.Add(new FieldResolver(template, BuildResolveContext(sel, reserve: true)).ResolveAll()); }   // print: each row takes its serial
             catch (ResolveException ex) { errors.Add($"{key}: {ex.Message}"); }
         }
         if (errors.Count > 0)

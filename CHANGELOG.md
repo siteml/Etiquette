@@ -4,6 +4,109 @@ All notable changes to Etiquette are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver
 (pre-1.0: minor bumps may change behavior).
 
+## [0.12.0] — 2026-09-14
+
+### Added
+- **Shift while resizing** keeps the element's aspect ratio (corner handles
+  anchor the opposite corner; edge handles scale the other axis about the
+  center).
+- **Drag & drop** — drop an `.svg` on the window to open it as the
+  template; drop a PNG/JPG/GIF/BMP on the canvas to place it as an image
+  at the drop point (anywhere else on the window: placed centered). An
+  template SVG (one with the `etiq:label` block) dropped on the canvas
+  opens straight away when no document is open, and asks first when one
+  is — the drop might have meant "place this". A plain drawing SVG
+  dropped on the canvas is refused with a pointer to export it as PNG
+  (SVG pictures can't be placed yet).
+- **Exact module size** — inspector → *Module* (any symbology) + *Exact
+  module* (`data-module-lock="1"`): the symbol prints at exactly that
+  X-dimension, centered in its box, for every value — not just the
+  sample the box was drawn around. *Box from module* sizes and locks the
+  box to the sample at that module. *Prints as* reports the exact size,
+  or that the content no longer fits and the box is filled instead.
+  Without *Exact module*, `data-module-mils` stays a minimum for the
+  printer feasibility check, as before.
+- **HRI text controls** on linear barcodes — inspector → *HRI size*
+  (pt; empty = automatic), *HRI align* (center / left / right), *HRI
+  font* and *HRI gap*, stored as `data-hri-size` / `data-hri-align` /
+  `data-hri-font` / `data-hri-gap`. The element footprint is unchanged:
+  the text band and gap come out of the bar height. Validated.
+- **Images.** Insert → *Image…* places a plain SVG `<image>` (PNG / JPEG /
+  GIF / BMP; file, URL or embedded `data:` URI). Same source handling as
+  the QR logo — template-relative paths, *Embed into template*,
+  *Extract…* — plus *Fit* (keep aspect / stretch), optional *Black &
+  white* with an adjustable *Threshold %* (`data-threshold`: hard cut, no
+  driver dithering on monochrome thermals; off by default so colour
+  printers get colour) and *Box from image aspect*. Drawn by the one renderer, so the
+  canvas and every print path agree; a missing source shows a crossed box
+  on the canvas and prints nothing. `xlink:href` from Inkscape is read.
+  Validator: `image-source`, `image-box`, `image-fit`, `image-threshold`.
+- **Override boxes can be blanked.** An `override="true"` field's box is
+  now prefilled with the fetched value as real text (italic, muted) and
+  is only submitted once the operator edits it — so deleting the text
+  prints a blank, where before an empty box meant "use the fetch". ↺
+  beside the box, and Clear, go back to the fetched value. Resolver
+  rule: a prompt value *present* wins, empty included; *absent* fetches.
+- **Inverse text** — inspector → Text → *Inverse*: white glyphs on a
+  black plate the size of the text box (`fill="white"` +
+  `data-plate="black"`), for "MASTER LOAD"-style callouts. One object,
+  nothing to keep aligned; bound text works the same; every print path
+  goes through the one renderer.
+- **Symbol size** on every 2D code — `data-symsize` (inspector → *Symbol
+  size*): pin the symbol grid regardless of content, the way a spec does.
+  Data Matrix: ECC200 square size (32×32 and up print with the 2×2
+  data-region cross a spec may call a "2×2 Data Matrix"; 64×64 and up
+  4×4). QR: version. Aztec: modules per side. rMQR: exact version.
+  PDF417: rows (with the existing columns). Content too long for the
+  pinned size steps up as before. Validated per symbology.
+- **Lock size** on barcodes (`data-lock-size`): no resize handles, no
+  tight-box snapping — a symbol sized to a spec stays that size.
+  Width/Height in the inspector remain the way to set it.
+- **"Prints as"** readout under every barcode: drawn extent, and for 2D
+  codes the module grid and module size — with a warning and a suggested
+  width when the module isn't a whole number of printer dots.
+
+### Changed
+- **Metadata namespace is now a URN**: `urn:etiquette:label:0.1` replaces
+  `https://etiquette.dev/ns/0.1` — a namespace is an identifier, and the
+  old one implied a domain nobody holds. Nothing to do: templates,
+  snippets and Inkscape files from earlier releases are read as before
+  (upgraded in memory; `etiq validate` warns), and the next save writes
+  the URN. Examples and shipped snippets updated.
+
+### Fixed
+- **Serial numbers were consumed by the preview.** Every recompute (each
+  keystroke, Clear, mode switch) reserved a counter value, so a label
+  with a `source="serial"` field advanced its serial while you typed.
+  The editor now resolves previews through a peeking provider: the
+  canvas shows the *next* serial, and only a print reserves it (Print
+  All reserves one per row). Copies of one print share the serial for
+  now — per-copy serials are part of series generation.
+- **Two shipped examples (`container-id.svg`, `part-tag.svg`) were laid out
+  in 96 px/in units** and opened at a tenth of their size; converted to
+  mils. `etiq validate` now errors when the viewBox is not the label
+  width in mils, with a hint when it looks like a px/in file.
+- **Ctrl+Z / Ctrl+G (and the other Edit shortcuts) sometimes did
+  nothing.** Opening the Edit menu while nothing was undoable / selected
+  left those items disabled after it closed, and a disabled item never
+  receives its shortcut. Shortcuts now always fire; the items guard
+  themselves.
+- **Resizing** — no resize cursor on hover, and a guide crossing the
+  selected element stole the drag. The selection is now the topmost
+  thing on the canvas: handle → element → guide → ruler, hover and click
+  alike. Size-locked elements no longer draw handles they don't honor.
+- **Each resize drag is its own undo step.** Consecutive resizes of one
+  element used to merge into a single entry.
+- **Vertical ruler had no labels** (rotated text drawn with a GDI call
+  that ignores the transform).
+- **Inspector rows that depend on a setting** (HRI options, Threshold %,
+  Tight box vs Lock size, embedded vs linked image) didn't appear after
+  toggling it and were shared between elements.
+- **Inverse text with an empty value** drew nothing; the black plate now
+  stays (an empty inverted field is a bar, not a hole).
+- *Lock size* checkbox wouldn't uncheck; switching a symbology from
+  Data Matrix to QR with a rectangle size pinned threw.
+
 ## [0.11.0] — 2026-09-11
 
 ### Changed

@@ -21,7 +21,12 @@ public static class Pdf417
     /// security -1 = auto by data length. Returns the module matrix
     /// (true = dark; one matrix row per symbol row) or null when the data
     /// cannot fit the size limits.</summary>
-    public static bool[,]? Encode(string content, int columns = 6, int security = -1)
+    public static bool[,]? Encode(string content, int columns = 6, int security = -1) =>
+        Encode(content, columns, security, 0);
+
+    /// <summary>minRows: pad to at least this many rows (3…90; 0 = as
+    /// needed) — with data-columns this pins the symbol's grid.</summary>
+    public static bool[,]? Encode(string content, int columns, int security, int minRows)
     {
         if (columns is < 1 or > 30) columns = 6;
         var bytes = Encoding.UTF8.GetBytes(content);
@@ -62,7 +67,8 @@ public static class Pdf417
         int lengthDescriptor = 1 + data.Count + padCount;
         int rows = (total + padCount) / columns;
         if (lengthDescriptor > 928 || rows > 90) return null;
-        while (rows < 3) { rows++; padCount += columns; lengthDescriptor += columns; }
+        int floor = Math.Max(3, Math.Min(90, minRows));
+        while (rows < floor) { rows++; padCount += columns; lengthDescriptor += columns; }
 
         var words = new List<int> { lengthDescriptor };
         words.AddRange(data);

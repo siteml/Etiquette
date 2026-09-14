@@ -37,6 +37,11 @@ At print time the engine replaces the element's text content with the value
 of `PartNo`. The literal content in the file is just the design-time preview.
 
 Optional:
+- `fill="white"` + `data-plate="black"` — inverse text ("MASTER LOAD"
+  white on black): the renderer draws a black plate the size of the
+  text's box, then the glyphs in white. Plain SVG `fill`, so Inkscape
+  round-trips it; every print path uses the same renderer. Give the text
+  a `data-width`/`data-height` box for padding around the words.
 - `data-clear="blank"` — editor-only, on a data-bound element: after the
   data panel's Clear the element draws EMPTY until the operator's next
   entry, even when its field still resolves (a compose of prompt defaults,
@@ -149,10 +154,27 @@ A placeholder `<rect>` marks the barcode's position and target box:
 - `data-field`: data source for the symbol content (or `data-value` for fixed)
 - `data-hri`: `none | below | above` human-readable interpretation (linear
   symbologies; rendered inside the target box — for `itf14` the HRI shows
-  the digits actually encoded, check digit included)
-- `data-module-mils` (optional): minimum X-dimension in mils; the engine
-  refuses/warns when the target printer cannot honor it (dot-snapping rule —
-  see PRINTING).
+  the digits actually encoded, check digit included). Presentation, all
+  optional: `data-hri-size` text height in user units (default: a quarter
+  of the box, at most 150 mils — the bars give up that band);
+  `data-hri-align` `left | center | right` (default center; text wider
+  than the box is squeezed to fit whichever way it is aligned);
+  `data-hri-font` family (default Arial; OCR-B where a spec demands it and
+  the font is installed — an unknown family falls back to Arial);
+  `data-hri-gap` clear space between bars and text in user units (taken
+  from the bars, default 0).
+- `data-module-mils` (optional): X-dimension in mils — one narrow bar, one
+  matrix cell. On its own it is a *minimum*: the symbol still fills the
+  box and the engine refuses/warns when the target printer cannot honor
+  it (dot-snapping rule — see PRINTING).
+- `data-module-lock="1"` (optional, with `data-module-mils`): the symbol
+  is drawn at **exactly** that module size, centered in the box, whatever
+  the content length — the spec's "X-dim 0.013 in" honored for every
+  serial, not just the sample. Content that no longer fits the box at
+  that module falls back to filling the box (the footprint is the
+  promise; the inspector's *Prints as* says so). Inspector: *Module* +
+  *Exact module*; *Box from module* sizes the box to the sample at that
+  module and locks it.
 - `data-ecc` (qr and rmqr, optional): error-correction level `L | M | Q | H`
   (rmqr supports only `M | H`); default `M`.
 - `data-columns` (pdf417 only, optional): data columns 1-30, default 6 —
@@ -161,6 +183,27 @@ A placeholder `<rect>` marks the barcode's position and target box:
   prefers the ECC200 rectangular formats (8x18 … 16x48), picked to best
   match the target box aspect; content too long for any rectangle falls
   back to a square symbol. Default square.
+- `data-symsize` (2D symbologies, optional): pin the symbol grid whatever
+  the content — the way a customer spec pins it. Read per symbology:
+  - `datamatrix`: a minimum square size, one of the ECC200 sizes
+    (`10`…`144`) — the look depends only on the size: `32`–`52` print as
+    2×2 data regions (the internal alignment cross a spec may show as a
+    "2×2 Data Matrix"), `64`–`104` as 4×4, `120`–`144` as 6×6 — or a
+    rectangular format as `RxC` (`8x18`, `8x32`, `12x26`, `12x36`,
+    `16x36`, `16x48`), which forces that rectangle whatever
+    `data-dmshape` says. A square size is ignored with
+    `data-dmshape="rect"`.
+  - `qr`: minimum version `1`–`40`, or the module count (`21`, `25`, …
+    `177`).
+  - `aztec`: minimum modules per side (compact `15`–`27`, full `19`–`151`).
+  - `rmqr`: exact version as `HxW` (`7x43` … `17x139`); content that does
+    not fit it falls back to the best fit for the box.
+  - `pdf417`: minimum rows `3`–`90` (columns: `data-columns`).
+  In every case content too long for the pinned size steps up to the
+  next that fits, as it would without the attribute.
+- `data-lock-size` (any barcode, optional): `1` pins the box — no resize
+  handles, no tight-box snapping — so a symbol sized to a spec stays that
+  size (editor behavior; renderers ignore it).
 - `data-tight` (2D symbologies, optional): `1` keeps the target box
   snapped to the symbol's exact drawn extent after editor resizes
   (editor behavior; renderers ignore it).
@@ -192,6 +235,38 @@ The rect itself is not rendered at print time; generated barcode vectors
 replace it, module widths snapped to integer printer dots, total size fitted
 within the rect minus snapping remainder.
 
+## Images
+
+A plain SVG `<image>` — logos, certification marks, pictograms:
+
+```xml
+<image x="200" y="150" width="1200" height="600" href="acme-logo.png"/>
+```
+
+- `href` (SVG 2) is what the editor writes; `xlink:href` (SVG 1.1 /
+  Inkscape) is read too. Sources are the same forms as `data-logo`: a path
+  relative to the label file (preferred — the folder moves as a unit), an
+  absolute path, an `http(s)` URL (fetched once per session), or a
+  `data:image/…;base64,…` URI (inspector → *Embed into template*; *Extract…*
+  writes it back out). PNG, JPEG, GIF, BMP.
+- The box is the printed extent. Default fit is SVG's: the largest size
+  that keeps the picture's aspect, centered (`xMidYMid meet`);
+  `preserveAspectRatio="none"` stretches to the box exactly. Other values
+  render as the default. *Box from image aspect* in the inspector sets the
+  height from the pixels for the current width.
+- `data-threshold="N"` (1–99) thresholds every pixel to black or white
+  at N % luminance — a crisp logo on a monochrome thermal printer instead
+  of the driver's dither pattern; lower N = less black. Absent (the
+  default), the driver receives the picture as-is: colour label printers
+  print colour, monochrome drivers dither greys their own way.
+- A source that cannot be read draws a crossed box on the canvas and
+  **nothing** in print; `etiq validate` warns (`image-source`) when a file
+  source is missing and errors when there is no `href` at all or the box
+  has no size (`image-box`).
+- Images are static: no `data-field`. A picture chosen by data is a
+  lookup map away from a future `data-field` on `<image>`; not offered
+  today.
+
 ## Data sources
 
 Field names are declared once in the metadata block so the engine and tools
@@ -199,7 +274,10 @@ can validate and prompt:
 
 ```xml
 <metadata>
-  <etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+  <etiq:label xmlns:etiq="urn:etiquette:label:0.1">
+    <!-- 0.12+: the namespace is a URN — an identifier, no domain implied.
+         Files written by earlier releases carry https://etiquette.dev/ns/0.1;
+         every reader upgrades that on load and the next save writes the URN. -->
     <etiq:field name="PartNo"  source="epicor"  column="JobAsmbl_PartNum"/>
     <etiq:field name="Qty"     source="prompt"  caption="Quantity:" mask="9999"/>
     <etiq:field name="Serial"  source="serial"  counter="NORTHWIND"
@@ -216,8 +294,12 @@ Source kinds:
   a **declared source** (see "Declared sources" below); without it, the
   engine's single implicit BAQ (legacy labelprint-style configuration).
   `override="true"` lets the operator type over the pulled value at
-  print time: a non-empty entry wins, an empty one falls back to the
-  fetch.
+  print time. Resolver rule: a value *present* for the field in the
+  prompt values is the value — empty included, so a fetched value can be
+  blanked; a field *absent* from them fetches. The designer's data panel
+  prefills the box with the fetched value (shown in the "from source"
+  style) and submits it only once the operator has edited it; ↺ next to
+  the box, and Clear, go back to the fetch.
 - `rest`   — generic REST source: `connection` names a profile (base URL,
   auth style, headers) defined in an engine-side data file — connections
   are configuration, never template content; `query` is the

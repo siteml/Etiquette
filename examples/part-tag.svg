@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Etiquette example: small part tag, 3in x 1in, prompt-driven, DataMatrix. -->
 <svg xmlns="http://www.w3.org/2000/svg"
-     width="3in" height="1in" viewBox="0 0 288 96">
+     width="3in" height="1in" viewBox="0 0 3000 1000">
   <metadata>
-    <etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+    <etiq:label xmlns:etiq="urn:etiquette:label:0.1">
       <etiq:field name="PartNo" source="prompt" caption="Part Number:"/>
       <etiq:field name="Lot"    source="prompt" caption="Lot:"/>
     </etiq:label>
   </metadata>
 
-  <text x="8"  y="28" font-family="Arial" font-size="16" font-weight="bold"
+  <text x="83"  y="292" font-family="Arial" font-size="167" font-weight="bold"
         data-field="PartNo" data-transform="upper">SAMPLE-PART</text>
-  <text x="8"  y="52" font-family="Arial" font-size="12"
+  <text x="83"  y="542" font-family="Arial" font-size="125"
         data-field="Lot">LOT-0000</text>
-  <rect x="200" y="8" width="80" height="80"
+  <rect x="2083" y="83" width="833" height="833"
         data-barcode="datamatrix" data-value="fixed-content-demo"/>
 </svg>

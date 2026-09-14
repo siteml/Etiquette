@@ -33,6 +33,9 @@ public static class TemplateValidator
         void Err(string code, string msg) => findings.Add(new(Severity.Error, code, msg));
         void Warn(string code, string msg) => findings.Add(new(Severity.Warning, code, msg));
 
+        if (t.LegacyNamespace)
+            Warn("namespace", "template uses the pre-0.12 etiq namespace (https://etiquette.dev/ns/0.1); it is read fine — save it from etiqedit to write the current one (urn:etiquette:label:0.1)");
+
         // --- root physical units ---
         if (t.WidthAttr is null || t.HeightAttr is null)
             Err("root-units", "svg root must declare width and height");
@@ -41,6 +44,18 @@ public static class TemplateValidator
             Warn("root-units", $"width/height should carry physical units (in/mm/cm): '{t.WidthAttr}' x '{t.HeightAttr}'");
         if (t.ViewBox is null)
             Err("root-viewbox", "svg root must declare a viewBox");
+        else if (t.WidthAttr is not null && Regex.Match(t.WidthAttr, @"^(\d+(?:\.\d+)?)(in|mm|cm)$") is { Success: true } wm)
+        {
+            // the user unit is 1 mil by convention: viewBox width must be
+            // the physical width in mils. A 96-px/in viewBox (Inkscape
+            // default, or a pre-convention file) lays out at 1/10 scale.
+            double inches = double.Parse(wm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
+                            * (wm.Groups[2].Value switch { "mm" => 1 / 25.4, "cm" => 1 / 2.54, _ => 1.0 });
+            double expect = inches * 1000, got = t.ViewBox[2];
+            if (Math.Abs(got - expect) > expect * 0.02)
+                Err("root-viewbox", $"viewBox width {got:0.#} is not the label width in mils ({expect:0.#}): the user unit must be 1 mil" +
+                    (Math.Abs(got - inches * 96) < inches * 2 ? " — this looks like a 96 px/in viewBox; scale every coordinate by 1000/96" : ""));
+        }
 
         // --- declared remote sources ---
         var sourcesByName = new Dictionary<string, EtiqTemplate.SourceDef>(StringComparer.Ordinal);
@@ -458,10 +473,32 @@ public static class TemplateValidator
                 Warn("barcode-content", $"barcode '{sym}': both data-field and data-value set; data-field wins");
             if (b.Hri is not null && b.Hri is not ("none" or "below" or "above"))
                 Err("barcode-hri", $"barcode '{sym}': data-hri must be none|below|above, got '{b.Hri}'");
+            if ((string?)b.El.Attribute("data-hri-size") is { } hsz &&
+                EtiqTemplate.ParseNum(hsz) is not > 0)
+                Err("barcode-hri", $"barcode '{sym}': data-hri-size must be a positive length, got '{hsz}'");
+            else if (EtiqTemplate.ParseNum((string?)b.El.Attribute("data-hri-size")) is { } hv && hv >= b.H)
+                Warn("barcode-hri", $"barcode '{sym}': data-hri-size {hv} is not smaller than the box height {b.H} — no room left for bars");
+            if ((string?)b.El.Attribute("data-hri-align") is { } hal && hal is not ("left" or "center" or "right"))
+                Err("barcode-hri", $"barcode '{sym}': data-hri-align must be left|center|right, got '{hal}'");
+            if ((string?)b.El.Attribute("data-hri-gap") is { } hgp && EtiqTemplate.ParseNum(hgp) is not >= 0)
+                Err("barcode-hri", $"barcode '{sym}': data-hri-gap must be a non-negative length, got '{hgp}'");
+            if (b.Hri is not ("below" or "above") &&
+                (b.El.Attribute("data-hri-size") ?? b.El.Attribute("data-hri-align") ??
+                 b.El.Attribute("data-hri-font") ?? b.El.Attribute("data-hri-gap")) is not null)
+                Warn("barcode-hri", $"barcode '{sym}': data-hri-* presentation attributes without data-hri=below|above have no effect");
             if (b.ModuleMils is not null && b.ModuleMils <= 0)
                 Err("barcode-module", $"barcode '{sym}': data-module-mils must be positive");
             else if (b.ModuleMils is not null && b.ModuleMils < 10)
                 Warn("barcode-module", $"barcode '{sym}': X-dim {b.ModuleMils} mils below AIAG ~10-13 mil guidance");
+            if ((string?)b.El.Attribute("data-module-lock") is { } ml)
+            {
+                if (ml != "1")
+                    Err("barcode-module", $"barcode '{sym}': data-module-lock must be \"1\" when present, got '{ml}'");
+                else if (b.ModuleMils is not > 0)
+                    Warn("barcode-module", $"barcode '{sym}': data-module-lock without a positive data-module-mils has no effect");
+                else if (b.ModuleMils > b.W)
+                    Err("barcode-module", $"barcode '{sym}': exact module {b.ModuleMils} mils is wider than the box {b.W}");
+            }
             if ((string?)b.El.Attribute("data-ecc") is { } becc)
             {
                 if (becc is not ("L" or "M" or "Q" or "H"))
@@ -475,6 +512,29 @@ public static class TemplateValidator
                     Err("barcode-columns", $"barcode '{sym}': data-columns must be 1-30, got '{bcols}'");
                 if (sym != "pdf417")
                     Warn("barcode-columns", $"barcode '{sym}': data-columns only applies to pdf417");
+            }
+            if ((string?)b.El.Attribute("data-symsize") is { } bss)
+            {
+                bool num = int.TryParse(bss, out int sn);
+                string? bad = sym switch
+                {
+                    "datamatrix" => (num && DataMatrix.SquareSizes.Contains(sn)) || DataMatrix.RectNames.Contains(bss) ? null
+                        : $"an ECC200 square size ({string.Join(",", DataMatrix.SquareSizes)}) or rectangle ({string.Join(",", DataMatrix.RectNames)})",
+                    "qr" => num && (sn is >= 1 and <= 40 || (sn >= 21 && sn <= 177 && (sn - 17) % 4 == 0)) ? null
+                        : "a version 1-40 or a module count 21,25,…,177",
+                    "aztec" => num && Aztec.Sizes.Contains(sn) ? null
+                        : $"an Aztec size in modules ({string.Join(",", Aztec.Sizes)})",
+                    "rmqr" => Rmqr.VersionNames.Contains(bss) ? null
+                        : $"an rMQR version HxW ({string.Join(",", Rmqr.VersionNames)})",
+                    "pdf417" => num && sn is >= 3 and <= 90 ? null : "a row count 3-90",
+                    _ => "(not applicable)",
+                };
+                if (bad == "(not applicable)")
+                    Warn("barcode-symsize", $"barcode '{sym}': data-symsize only applies to 2D symbologies");
+                else if (bad is not null)
+                    Err("barcode-symsize", $"barcode '{sym}': data-symsize must be {bad}, got '{bss}'");
+                else if (sym == "datamatrix" && num && (string?)b.El.Attribute("data-dmshape") == "rect")
+                    Warn("barcode-symsize", "barcode 'datamatrix': a square data-symsize is ignored with data-dmshape=\"rect\" — pick a rectangle size instead");
             }
             if ((string?)b.El.Attribute("data-logo") is { } blogo)
             {
@@ -495,6 +555,27 @@ public static class TemplateValidator
                 if (b.El.Attribute("data-logo") is null)
                     Warn("barcode-logo", $"barcode '{sym}': data-logo-scale without data-logo has no effect");
             }
+        }
+
+        // --- <image>: a readable source (href / xlink:href), a real box ---
+        foreach (var im in t.Doc.Descendants().Where(e => e.Name.LocalName == "image"))
+        {
+            string? href = (string?)im.Attribute("href")
+                ?? (string?)im.Attribute(XNamespace.Get("http://www.w3.org/1999/xlink") + "href");
+            if (string.IsNullOrWhiteSpace(href))
+                Err("image-source", "<image> has no href — nothing to draw");
+            else if (!href.StartsWith("data:") && !href.StartsWith("http://") && !href.StartsWith("https://") &&
+                     t.Path != "<memory>" && Path.GetDirectoryName(t.Path) is { } ibd &&
+                     !File.Exists(Path.IsPathRooted(href) ? href : Path.Combine(ibd, href)))
+                Warn("image-source", $"<image> source '{href}' not found (prints nothing there)");
+            if (EtiqTemplate.ParseNum((string?)im.Attribute("width")) is not > 0 ||
+                EtiqTemplate.ParseNum((string?)im.Attribute("height")) is not > 0)
+                Err("image-box", "<image> needs a positive width and height");
+            if ((string?)im.Attribute("data-threshold") is { } thr &&
+                (!int.TryParse(thr, out int tv) || tv is < 1 or > 99))
+                Err("image-threshold", $"<image> data-threshold must be 1-99 (% luminance), got '{thr}'");
+            if ((string?)im.Attribute("preserveAspectRatio") is { } par && par != "none" && !par.StartsWith("xMidYMid"))
+                Warn("image-fit", $"<image> preserveAspectRatio=\"{par}\" renders as the default (keep aspect, centered)");
         }
 
         // --- text fit (any <text>/<tspan>, dynamic or static) ---

@@ -72,7 +72,17 @@ public static class Rmqr
     /// instead of M. targetAspect (box W/H, ≤0 = ignore): among fitting
     /// versions pick the one whose w/h best matches; otherwise smallest.
     /// Null when the content doesn't fit any version (M max 152 bytes).</summary>
-    public static bool[,]? Encode(string content, bool eccH = false, double targetAspect = 0)
+    public static bool[,]? Encode(string content, bool eccH = false, double targetAspect = 0) =>
+        Encode(content, eccH, targetAspect, null);
+
+    /// <summary>The 32 rMQR versions as "HxW" (R7x43 … R17x139).</summary>
+    public static IReadOnlyList<string> VersionNames { get; } =
+        Versions.Select(v => $"{v.H}x{v.W}").ToArray();
+
+    /// <summary>version: force one version ("11x59"); null = best fit by
+    /// aspect. Content that does not fit the forced version falls back to
+    /// the best fit, never fails on the option alone.</summary>
+    public static bool[,]? Encode(string content, bool eccH, double targetAspect, string? version)
     {
         var data = new byte[content.Length];
         for (int i = 0; i < content.Length; i++)
@@ -83,6 +93,12 @@ public static class Rmqr
 
         V? best = null;
         double bestScore = double.MaxValue;
+        if (version is not null)
+        {
+            var forced = Versions.FirstOrDefault(v => $"{v.H}x{v.W}" == version);
+            if (forced is not null && 3 + forced.Cci + 8 * data.Length <= (eccH ? forced.BitsH : forced.BitsM))
+                return Build(forced, data, eccH);
+        }
         foreach (var v in Versions)
         {
             int dbits = eccH ? v.BitsH : v.BitsM;

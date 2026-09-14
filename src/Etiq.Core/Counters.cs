@@ -108,6 +108,22 @@ public sealed class EpicorCounterProvider : ICounterProvider
 /// production multi-station use; that's the whole reason counters are
 /// centralized in Epicor (HANDOFF decision #4).
 /// </summary>
+/// <summary>
+/// A provider that never issues: ReserveAsync returns what the inner
+/// provider WOULD issue next (its PeekAsync) and advances nothing. The
+/// editor resolves the preview through this — a serial on the canvas is
+/// the next value, and only a print reserves one.
+/// </summary>
+public sealed class PeekCounterProvider : ICounterProvider
+{
+    private readonly ICounterProvider _inner;
+    public PeekCounterProvider(ICounterProvider inner) => _inner = inner;
+    public Task<long> ReserveAsync(string counter, int count = 1, CancellationToken ct = default)
+        => _inner.PeekAsync(counter, ct);
+    public Task<long> PeekAsync(string counter, CancellationToken ct = default)
+        => _inner.PeekAsync(counter, ct);
+}
+
 public sealed class LocalFileCounterProvider : ICounterProvider
 {
     private readonly string _path;

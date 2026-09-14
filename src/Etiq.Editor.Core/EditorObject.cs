@@ -209,8 +209,12 @@ public sealed class EditorObject
     /// axes that actually moved are written, so a vertical font-scale drag
     /// never accidentally locks a natural-width label into a data-width
     /// box. Lines resize by their endpoints instead.</summary>
-    public EditCommand Resize(RectD r, ITextMeasurer? measurer = null)
+    /// <param name="gesture">merge scope: steps of ONE drag gesture collapse
+    /// into one undo entry; a different gesture (next drag) is its own
+    /// entry. Null = merges with any preceding resize of this element.</param>
+    public EditCommand Resize(RectD r, ITextMeasurer? measurer = null, string? gesture = null)
     {
+        string mk = gesture is null ? $"resize:{ElId()}" : $"resize:{ElId()}:{gesture}";
         if (Kind == ObjectKind.Line)
             throw new InvalidOperationException("resize a line by its endpoints");
         if (Kind != ObjectKind.Text)
@@ -220,7 +224,7 @@ public sealed class EditorObject
                     ("y", (string?)El.Attribute("y"), N(r.Y)),
                     ("width", (string?)El.Attribute("width"), N(r.W)),
                     ("height", (string?)El.Attribute("height"), N(r.H)),
-                }, $"resize {Kind}", mergeKey: $"resize:{ElId()}");
+                }, $"resize {Kind}", mergeKey: mk);
 
         var cur = Bounds(measurer);
         var changes = new List<(string, string?, string?)>();
@@ -244,7 +248,7 @@ public sealed class EditorObject
                 changes.Add(("data-height", (string?)El.Attribute("data-height"), N(r.H)));
                 changes.Add(("y", (string?)El.Attribute("y"),
                              N(r.Y + GetNum("font-size", 12) * 0.8)));
-                return EditCommand.SetAttrs(El, changes, "resize text", mergeKey: $"resize:{ElId()}");
+                return EditCommand.SetAttrs(El, changes, "resize text", mergeKey: mk);
             }
             // scale the font by the height RATIO (multiline: bounds height
             // is size + (n-1)*lineHeight, not the em size itself)
@@ -259,7 +263,7 @@ public sealed class EditorObject
         }
         if (changes.Count == 0)
             changes.Add(("x", (string?)El.Attribute("x"), (string?)El.Attribute("x")));
-        return EditCommand.SetAttrs(El, changes, "resize text", mergeKey: $"resize:{ElId()}");
+        return EditCommand.SetAttrs(El, changes, "resize text", mergeKey: mk);
     }
 
     /// <summary>Move one endpoint of a line (which: 1 or 2). Mergeable so an

@@ -1,4 +1,5 @@
 using Etiq.Editor.Core;
+using System.Xml.Linq;
 
 namespace Etiq.Editor;
 
@@ -78,7 +79,10 @@ public static class LabelRenderer
                         (string?)o.El.Attribute("data-logo"), baseDir,
                         (int)o.GetNum("data-logo-scale", 0),
                         (string?)o.El.Attribute("data-dmshape") == "rect",
-                        (string?)o.El.Attribute("data-hri"));
+                        (string?)o.El.Attribute("data-hri"),
+                        (string?)o.El.Attribute("data-symsize"),
+                        HriStyle.From(o),
+                        ModuleLock(o));
                     break;
                 }
                 case ObjectKind.Text:
@@ -89,7 +93,9 @@ public static class LabelRenderer
                     DrawText(g, o, text, measurer);
                     break;
                 }
-                // Image: not supported in the print path yet
+                case ObjectKind.Image:
+                    DrawImage(g, o, baseDir);   // unreadable source = nothing printed
+                    break;
             }
         }
         finally
@@ -115,10 +121,22 @@ public static class LabelRenderer
             var vlines = text.Split('\n');
             text = lineNo < vlines.Length ? vlines[lineNo] : "";
         }
-        if (text == "") return;
         double size = o.GetNum("font-size", 12);
         double origSize = size;
         var b = o.Bounds(measurer);
+        // inverse text ("MASTER LOAD" white on black): data-plate="black"
+        // draws a black plate the size of the text's box first; fill="white"
+        // draws the glyphs white. Both are plain SVG / plain attributes, so
+        // Inkscape round-trips them and every print path (GDI driver, ZPL
+        // raster) gets them from this one renderer. The plate is the
+        // element's box (design bounds / data-width box), so it stays when
+        // the bound value is empty — an inverted field with nothing in it is
+        // a black bar, not a hole in the label.
+        if ((string?)o.El.Attribute("data-plate") == "black")
+            g.FillRectangle(Brushes.Black, (float)b.X, (float)b.Y, (float)b.W, (float)b.H);
+        if (text == "") return;
+        var ink = string.Equals((string?)o.El.Attribute("fill"), "white", StringComparison.OrdinalIgnoreCase)
+            ? Brushes.White : Brushes.Black;
         var lines = text.Split('\n');
         double lineH = o.GetNum("data-line-height", size * 1.2);
         double boxW = o.GetNum("data-width", 0);
@@ -211,7 +229,7 @@ public static class LabelRenderer
                 _ => 0,
             };
             // off is a PHYSICAL offset: undo the squeeze for the coordinate
-            g.DrawString(lines[i], font, Brushes.Black,
+            g.DrawString(lines[i], font, ink,
                 (float)(b.X + off / squeeze),
                 (float)(top0 + yOff + i * lineH),
                 StringFormat.GenericTypographic);
@@ -247,7 +265,8 @@ public static class LabelRenderer
                 withLogo ? "H" : (string?)o.El.Attribute("data-ecc"),
                 0, withLogo ? 2 : 1,
                 (string?)o.El.Attribute("data-dmshape") == "rect",
-                b.W / b.H);   // same aspect rule as the draw, so the snap matches
+                b.W / b.H,    // same aspect rule as the draw, so the snap matches
+                (string?)o.El.Attribute("data-symsize"));
         double w, h;
         if (m is null)
         {
@@ -269,21 +288,28 @@ public static class LabelRenderer
     public static bool[,]? TryEncodeMatrix(string? symbology, string content,
                                            string? ecc = null, int columns = 0,
                                            int minVersion = 1, bool dmRect = false,
-                                           double dmAspect = 0)
+                                           double dmAspect = 0, string? symSize = null)
     {
+        // data-symsize — one attribute, read per symbology (docs/convention.md):
+        //   qr          version 1-40 ("7"), or "45" modules → the version with that side
+        //   datamatrix  square size "32" (pad to at least) or a rectangle "12x36" (forced)
+        //   aztec       modules per side "37" (pad to at least)
+        //   rmqr        exact version "11x59" (falls back to best fit if the content won't fit)
+        //   pdf417      minimum rows "20" (columns come from data-columns)
+        int n = int.TryParse(symSize, out int parsed) ? parsed : 0;
         try
         {
             return symbology switch
             {
                 "qr" => Etiq.Core.QrCode.Encode(content,
                             string.IsNullOrEmpty(ecc) ? 'M' : char.ToUpperInvariant(ecc[0]),
-                            minVersion),
-                "datamatrix" => Etiq.Core.DataMatrix.Encode(content, dmRect, dmAspect),
+                            Math.Max(minVersion, n <= 40 ? n : (n - 17) / 4)),   // modules → version
+                "datamatrix" => Etiq.Core.DataMatrix.Encode(content, dmRect, dmAspect, symSize),
                 // rmqr picks its version by the box aspect too; ecc M|H
-                "rmqr" => Etiq.Core.Rmqr.Encode(content, ecc == "H", dmAspect),
-                "aztec" => Etiq.Core.Aztec.Encode(content),
+                "rmqr" => Etiq.Core.Rmqr.Encode(content, ecc == "H", dmAspect, symSize),
+                "aztec" => Etiq.Core.Aztec.Encode(content, n),
                 "pdf417" => Etiq.Core.Pdf417.Encode(content,
-                            columns is >= 1 and <= 30 ? columns : 6),
+                            columns is >= 1 and <= 30 ? columns : 6, -1, n),
                 _ => null,
             };
         }
@@ -299,25 +325,41 @@ public static class LabelRenderer
                                    string content, string? ecc = null, int columns = 0,
                                    string? logo = null, string? baseDir = null,
                                    int logoScale = 0, bool dmRect = false,
-                                   string? hri = null)
+                                   string? hri = null, string? symSize = null,
+                                   HriStyle? hriStyle = null, double moduleLock = 0)
     {
         if (string.IsNullOrEmpty(content)) return false;
         var mods = TryEncode(symbology, content);
         if (mods is not null)
         {
             // HRI (data-hri below|above): reserve a text band inside the
-            // box so the overall element footprint never changes
+            // box so the overall element footprint never changes. Band =
+            // auto (25 % of the box, ≤150 mils) or the pinned font size;
+            // data-hri-gap adds clear space between bars and text.
             var barBox = box;
             if (hri is "below" or "above")
             {
-                double band = Math.Min(box.H * 0.25, 150);   // mils
+                var hs = hriStyle ?? HriStyle.Default;
+                double band = hs.Size > 0 ? hs.Size / HriFontOfBand : Math.Min(box.H * 0.25, 150);
+                double take = Math.Min(box.H, band + Math.Max(0, hs.Gap));
                 barBox = hri == "below"
-                    ? new RectD(box.X, box.Y, box.W, box.H - band)
-                    : new RectD(box.X, box.Y + band, box.W, box.H - band);
+                    ? new RectD(box.X, box.Y, box.W, box.H - take)
+                    : new RectD(box.X, box.Y + take, box.W, box.H - take);
                 DrawHri(g, hri == "below"
                         ? new RectD(box.X, box.Bottom - band, box.W, band)
                         : new RectD(box.X, box.Y, box.W, band),
-                    HriText(symbology, content));
+                    HriText(symbology, content), hs);
+            }
+            // exact X-dim (data-module-lock): bars at moduleLock per module,
+            // centered; too wide for the box → fill as usual (the footprint
+            // is the promise, the inspector says it does not fit)
+            if (moduleLock > 0)
+            {
+                int total = 0;
+                foreach (var mw in mods) total += mw;
+                double w = total * moduleLock;
+                if (w <= barBox.W + 0.01)
+                    barBox = new RectD(barBox.X + (barBox.W - w) / 2, barBox.Y, w, barBox.H);
             }
             DrawBars(g, barBox, mods);
             return true;
@@ -327,12 +369,41 @@ public static class LabelRenderer
         // spare a readable-size keepout even at H
         var m = TryEncodeMatrix(symbology, content, withLogo ? "H" : ecc, columns,
                                 withLogo ? 2 : 1, dmRect,
-                                box.H > 0 ? box.W / box.H : 0);   // box aspect picks the rect size
+                                box.H > 0 ? box.W / box.H : 0,    // box aspect picks the rect size
+                                symSize);                         // data-symsize: pinned symbol size
         if (m is null) return false;
-        var drawn = DrawMatrix(g, box, m,
+        var mbox = box;
+        if (moduleLock > 0)
+        {
+            // exact module: rows×cols at moduleLock, centered; fall back to
+            // fill-the-box when it does not fit
+            double w = m.GetLength(1) * moduleLock, h = m.GetLength(0) * moduleLock;
+            if (w <= box.W + 0.01 && h <= box.H + 0.01)
+                mbox = new RectD(box.X + (box.W - w) / 2, box.Y + (box.H - h) / 2, w, h);
+        }
+        var drawn = DrawMatrix(g, mbox, m,
             keepSquare: symbology is "qr" or "datamatrix" or "aztec" or "rmqr");
         if (withLogo) DrawQrLogo(g, drawn, m.GetLength(0), logo!, baseDir, logoScale);
         return true;
+    }
+
+    /// <summary>data-module-lock="1" + data-module-mils → the exact module
+    /// size to draw at (user units); 0 = fill the box (default).</summary>
+    public static double ModuleLock(EditorObject o) =>
+        (string?)o.El.Attribute("data-module-lock") == "1" ? o.GetNum("data-module-mils", 0) : 0;
+
+    /// <summary>HRI presentation (docs/convention.md): data-hri-size (font
+    /// em height in user units, 0 = auto from the box), data-hri-align
+    /// left|center|right, data-hri-font family, data-hri-gap (clear space
+    /// between bars and text, user units).</summary>
+    public sealed record HriStyle(double Size, string Align, string Font, double Gap)
+    {
+        public static readonly HriStyle Default = new(0, "center", "Arial", 0);
+        public static HriStyle From(EditorObject o) => new(
+            o.GetNum("data-hri-size", 0),
+            (string?)o.El.Attribute("data-hri-align") ?? "center",
+            (string?)o.El.Attribute("data-hri-font") is { Length: > 0 } f ? f : "Arial",
+            o.GetNum("data-hri-gap", 0));
     }
 
     /// <summary>What the human-readable line SHOWS: for itf14 the digits
@@ -344,22 +415,37 @@ public static class LabelRenderer
             ? Etiq.Core.Itf.Normalize(content)
             : content;
 
-    /// <summary>Centered single-line HRI text: sized to the band height,
-    /// squeezed horizontally when the box is narrower than the text (same
-    /// squeeze rule as data-width text).</summary>
-    private static void DrawHri(Graphics g, RectD band, string text)
+    /// <summary>Font em height as a fraction of the HRI band height.</summary>
+    private const double HriFontOfBand = 0.78;
+
+    /// <summary>Single-line HRI text in its band: font size from the band
+    /// (or pinned), aligned left / center / right, squeezed horizontally
+    /// when the box is narrower than the text (same squeeze rule as
+    /// data-width text).</summary>
+    private static void DrawHri(Graphics g, RectD band, string text, HriStyle hs)
     {
         if (text.Length == 0 || band.W <= 0 || band.H <= 0) return;
-        using var font = new Font("Arial", (float)(band.H * 0.78), GraphicsUnit.Pixel);
-        var sz = g.MeasureString(text, font, PointF.Empty, StringFormat.GenericTypographic);
-        if (sz.Width <= 0) return;
-        float squeeze = sz.Width > band.W ? (float)(band.W / sz.Width) : 1f;
-        var st = g.Save();
-        g.TranslateTransform((float)(band.X + band.W / 2), (float)(band.Y + band.H / 2));
-        g.ScaleTransform(squeeze, 1f);
-        g.DrawString(text, font, Brushes.Black,
-            -sz.Width / 2, -sz.Height / 2, StringFormat.GenericTypographic);
-        g.Restore(st);
+        Font font;
+        try { font = new Font(hs.Font, (float)(band.H * HriFontOfBand), GraphicsUnit.Pixel); }
+        catch { font = new Font("Arial", (float)(band.H * HriFontOfBand), GraphicsUnit.Pixel); }
+        using (font)
+        {
+            var sz = g.MeasureString(text, font, PointF.Empty, StringFormat.GenericTypographic);
+            if (sz.Width <= 0) return;
+            float squeeze = sz.Width > band.W ? (float)(band.W / sz.Width) : 1f;
+            double ax = hs.Align switch
+            {
+                "left" => band.X + sz.Width * squeeze / 2,
+                "right" => band.Right - sz.Width * squeeze / 2,
+                _ => band.X + band.W / 2,
+            };
+            var st = g.Save();
+            g.TranslateTransform((float)ax, (float)(band.Y + band.H / 2));
+            g.ScaleTransform(squeeze, 1f);
+            g.DrawString(text, font, Brushes.Black,
+                -sz.Width / 2, -sz.Height / 2, StringFormat.GenericTypographic);
+            g.Restore(st);
+        }
     }
 
     /// <summary>Render a module matrix into the box, merging horizontal
@@ -513,6 +599,95 @@ public static class LabelRenderer
 
     /// <summary>Crop to the bounding box of visible pixels (alpha > ~6% and
     /// not near-white). Returns the input when nothing trims.</summary>
+    // ---- <image> objects (docs/convention.md "Images") ----
+
+    private static readonly Dictionary<string, Image?> ImageCache = new();
+
+    /// <summary>The image source: SVG 2 `href`, else Inkscape/SVG 1.1
+    /// `xlink:href`. Same source forms as data-logo (path relative to the
+    /// template, absolute path, http(s), data: URI).</summary>
+    public static string? ImageHref(EditorObject o) =>
+        (string?)o.El.Attribute("href")
+        ?? (string?)o.El.Attribute(XNamespace.Get("http://www.w3.org/1999/xlink") + "href");
+
+    /// <summary>Load an image source untrimmed, cached like logos (file
+    /// sources key on mtime; failures cache as null).</summary>
+    public static Image? LoadImage(string spec, string? baseDir)
+    {
+        string key = spec + "|" + baseDir;
+        if (!spec.StartsWith("data:") && !spec.StartsWith("http"))
+        {
+            try
+            {
+                string p = ResolveLogoPath(spec, baseDir);
+                if (File.Exists(p)) key += "|" + File.GetLastWriteTimeUtc(p).Ticks;
+            }
+            catch { /* key without mtime */ }
+        }
+        if (ImageCache.TryGetValue(key, out var hit)) return hit;
+        Image? img = null;
+        try
+        {
+            var bytes = spec == "etiq" ? null : FetchLogoBytes(spec, baseDir);
+            if (bytes is not null) img = Image.FromStream(new MemoryStream(bytes));
+        }
+        catch { img = null; }
+        ImageCache[key] = img;
+        return img;
+    }
+
+    /// <summary>Draw an &lt;image&gt; into its box: aspect-fit centered
+    /// (SVG's default preserveAspectRatio), or stretched when
+    /// preserveAspectRatio="none". data-threshold="N" (1-99, % luminance)
+    /// thresholds to pure black/white — a logo on a monochrome thermal
+    /// printer without the driver's dither noise; absent = the picture as
+    /// is (colour printers print colour, mono drivers dither). False when the source can't be read — the caller
+    /// decides what a missing image looks like (canvas: placeholder;
+    /// print: nothing).</summary>
+    public static bool DrawImage(Graphics g, EditorObject o, string? baseDir)
+    {
+        string? spec = ImageHref(o);
+        if (string.IsNullOrWhiteSpace(spec)) return false;
+        var img = LoadImage(spec, baseDir);
+        if (img is null) return false;
+        var b = o.Bounds();
+        if (b.W <= 0 || b.H <= 0) return false;
+        RectangleF dest;
+        if ((string?)o.El.Attribute("preserveAspectRatio") == "none")
+            dest = new RectangleF((float)b.X, (float)b.Y, (float)b.W, (float)b.H);
+        else
+        {
+            double s = Math.Min(b.W / img.Width, b.H / img.Height);
+            double w = img.Width * s, h = img.Height * s;
+            dest = new RectangleF((float)(b.X + (b.W - w) / 2), (float)(b.Y + (b.H - h) / 2), (float)w, (float)h);
+        }
+        var prevInterp = g.InterpolationMode;
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        try
+        {
+            double thr = o.GetNum("data-threshold", 0);
+            if (thr is > 0 and < 100)
+            {
+                // luminance → threshold: every pixel ends black or white
+                using var attrs = new System.Drawing.Imaging.ImageAttributes();
+                attrs.SetColorMatrix(new System.Drawing.Imaging.ColorMatrix(new[]
+                {
+                    new[] { 0.299f, 0.299f, 0.299f, 0, 0 },
+                    new[] { 0.587f, 0.587f, 0.587f, 0, 0 },
+                    new[] { 0.114f, 0.114f, 0.114f, 0, 0 },
+                    new[] { 0f, 0, 0, 1, 0 },
+                    new[] { 0f, 0, 0, 0, 1 },
+                }));
+                attrs.SetThreshold((float)(thr / 100));
+                g.DrawImage(img, Rectangle.Round(dest), 0, 0, img.Width, img.Height, GraphicsUnit.Pixel, attrs);
+            }
+            else
+                g.DrawImage(img, dest);
+        }
+        finally { g.InterpolationMode = prevInterp; }
+        return true;
+    }
+
     private static Image TrimLogo(Bitmap bmp)
     {
         int x1 = bmp.Width, y1 = bmp.Height, x2 = -1, y2 = -1;

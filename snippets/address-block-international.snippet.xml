@@ -13,7 +13,7 @@
      (e.g. source="list" list="Customers" column="City"). AddrName is
      included for the recipient line - bind it to its own text element;
      it is intentionally NOT part of the block. -->
-<etiq:snippet xmlns:etiq="https://etiquette.dev/ns/0.1"
+<etiq:snippet xmlns:etiq="urn:etiquette:label:0.1"
               name="Address Block (International, comprehensive)"
               description="~35 countries in 6 format groups; names or ISO codes accepted; unknowns print as typed">
 

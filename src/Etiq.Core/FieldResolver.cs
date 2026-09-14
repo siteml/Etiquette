@@ -130,10 +130,12 @@ public sealed class FieldResolver
             "prompt" => _ctx.PromptValues.GetValueOrDefault(name, ""),
             "auto" => ResolveAuto(f),
             "serial" => ResolveSerial(f),
-            // override="true": the operator's typed value beats the pull;
-            // empty entry = fetch as usual
+            // override="true": an entry PRESENT in PromptValues is the value,
+            // empty included (an operator can blank a fetched field); a
+            // field ABSENT from PromptValues fetches as usual. The editor
+            // only submits override boxes the operator has edited.
             "epicor" or "rest" when f.Override &&
-                          _ctx.PromptValues.GetValueOrDefault(f.Name, "") is { Length: > 0 } typed
+                          _ctx.PromptValues.TryGetValue(f.Name, out var typed)
                 => typed,
             // from= reads a column of a declared etiq:query, whatever the
             // connection type behind it (epicor BAQ row, glpi item, ...)

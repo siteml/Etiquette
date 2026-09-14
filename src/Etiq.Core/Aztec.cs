@@ -13,7 +13,25 @@ public static class Aztec
 {
     /// <summary>Encode content (Latin-1). Null when it cannot fit the
     /// largest symbol or contains characters beyond Latin-1.</summary>
-    public static bool[,]? Encode(string content)
+    public static bool[,]? Encode(string content) => Encode(content, 0);
+
+    /// <summary>Every symbol size (modules per side) Aztec defines: compact
+    /// 15…27, full 19…151.</summary>
+    public static IReadOnlyList<int> Sizes { get; } =
+        Enumerable.Range(1, 4).Select(l => SizeOf(true, l))
+        .Concat(Enumerable.Range(1, 32).Select(l => SizeOf(false, l)))
+        .Distinct().OrderBy(n => n).ToArray();
+
+    /// <summary>Modules per side for a (compact, layers) symbol.</summary>
+    public static int SizeOf(bool compact, int layers)
+    {
+        int baseSize = (compact ? 11 : 14) + layers * 4;
+        return compact ? baseSize : baseSize + 1 + 2 * ((baseSize / 2 - 1) / 15);
+    }
+
+    /// <summary>minSize: pad to at least this many modules per side (0 =
+    /// smallest that fits) — a spec that pins the symbol size.</summary>
+    public static bool[,]? Encode(string content, int minSize)
     {
         var data = new byte[content.Length];
         for (int i = 0; i < content.Length; i++)
@@ -48,6 +66,7 @@ public static class Aztec
                 int b = WordSize(l);
                 int cap = TotalBits(l, comp);
                 var st = Stuff(bits, b);
+                if (SizeOf(comp, l) < minSize) continue;
                 if (st.Count + eccBits <= cap && st.Count / b <= cap / b - 3)
                 {
                     if (cap < tb) { compact = comp; layers = l; stuffed = st; tb = cap; }

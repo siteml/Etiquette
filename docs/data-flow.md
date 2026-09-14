@@ -98,9 +98,14 @@ Consequences, all intended:
   involved).
 - A commit that changes nothing is a no-op. Commit runs synchronously on
   focus loss, so a Print click that took the focus already sees the value.
-- `override="true"` fields: box empty → fetched value; box non-empty →
-  box. The ghost text in the box is the **fetched** value only, never the
-  operator's own entry echoed back.
+- `override="true"` fields: the box is **prefilled** with the fetched
+  value as real text (italic, muted — the "from source" style; redacted
+  like the canvas when Redact is on) and is *not* submitted to the
+  resolve. The operator's first keystroke makes the box the value —
+  empty included, so a fetched value can be blanked. ↺ beside the box
+  and Clear drop the edit; the next recompute refills it from the fetch.
+  What is in the box is what prints; there is no "empty means fetched"
+  rule to explain.
 
 ## 5. Fetch
 

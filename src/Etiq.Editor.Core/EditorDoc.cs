@@ -26,8 +26,15 @@ public sealed class EditorDoc
     private EditorDoc(XDocument xml, string? path)
     {
         Xml = xml; Path = path;
+        // pre-0.12 namespace → current one, in memory; the file on disk is
+        // untouched until the user saves (then it is written upgraded)
+        LegacyNamespace = EtiqTemplate.UpgradeNamespace(xml);
         _savedXml = xml.ToString(SaveOptions.DisableFormatting);
     }
+
+    /// <summary>The file carried the pre-0.12 namespace; Save writes the
+    /// current one.</summary>
+    public bool LegacyNamespace { get; }
 
     public static EditorDoc Load(string path) => new(XDocument.Load(path), path);
     public static EditorDoc Parse(string xml) => new(XDocument.Parse(xml), null);
@@ -69,7 +76,7 @@ public sealed class EditorDoc
 
     // ---- metadata (etiq:label: fields, maps, lists) ----
 
-    public static readonly XNamespace EtiqNs = "https://etiquette.dev/ns/0.1";
+    public static readonly XNamespace EtiqNs = EtiqTemplate.Ns;
 
     /// <summary>The live etiq:label element, or null when the template has
     /// no metadata yet.</summary>

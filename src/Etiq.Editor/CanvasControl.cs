@@ -145,6 +145,8 @@ public sealed class CanvasControl : Control
     }
 
     private PointD ToWorld(Point p) => new((p.X - Pan.X) / Zoom, (p.Y - Pan.Y) / Zoom);
+    /// <summary>Client point → label coordinates (drop targets).</summary>
+    public PointD WorldAt(Point client) => ToWorld(client);
 
     /// <summary>A selected object under the cursor, if any — selection
     /// overrides z-order so buried elements can be dug out via the outline
@@ -156,6 +158,40 @@ public sealed class CanvasControl : Control
             s.HitTest(w, 3 / Zoom, _measurer));
 
     private bool InSelection(EditorObject o) => _sel.Any(s => s.El == o.El);
+
+    /// <summary>Constrain a resize result to `aspect` (W/H) for handle h:
+    /// the edge(s) the handle does not move stay where they are.</summary>
+    private static RectD KeepAspect(RectD r, Core.Handle h, double aspect)
+    {
+        bool movesX = h is Core.Handle.E or Core.Handle.W or Core.Handle.NE or Core.Handle.NW or Core.Handle.SE or Core.Handle.SW;
+        bool movesY = h is Core.Handle.N or Core.Handle.S or Core.Handle.NE or Core.Handle.NW or Core.Handle.SE or Core.Handle.SW;
+        double w = r.W, hh = r.H;
+        if (movesX && movesY)
+        {
+            // corner: whichever axis grew/shrank more (relative) leads
+            if (Math.Abs(r.W / aspect) >= Math.Abs(r.H)) hh = w / aspect; else w = hh * aspect;
+        }
+        else if (movesX) hh = w / aspect;
+        else w = hh * aspect;
+        double x = r.X, y = r.Y;
+        // anchor: the opposite side of the moved edge(s); edge handles center the other axis
+        if (h is Core.Handle.W or Core.Handle.NW or Core.Handle.SW) x = r.Right - w;
+        if (h is Core.Handle.N or Core.Handle.NW or Core.Handle.NE) y = r.Bottom - hh;
+        if (!movesX) x = r.X + (r.W - w) / 2;
+        if (!movesY) y = r.Y + (r.H - hh) / 2;
+        return new RectD(x, y, w, hh);
+    }
+
+    /// <summary>The resize handle of the single selected element under
+    /// the pointer (line endpoints are not handles here), or null — the
+    /// same rule OnMouseDown uses, so hover cursor and click agree.</summary>
+    private Core.Handle? HoverHandle(PointD w)
+    {
+        if (_sel.Count != 1 || Selected is not { } s || s.Kind == ObjectKind.Line) return null;
+        if ((string?)s.El.Attribute("data-lock-size") == "1") return null;
+        var h = Geometry.HitHandle(w, s.Bounds(_measurer), s.RotationDeg, s.RotationPivot, 6 / Zoom);
+        return h is null || h == Core.Handle.Rotate ? null : h;
+    }
 
     private RectD SelectionBounds()
     {
@@ -640,6 +676,7 @@ public sealed class CanvasControl : Control
         var bg = Color.FromArgb(245, 245, 245);
         var fg = Color.FromArgb(60, 60, 60);
         using var bgBrush = new SolidBrush(bg);
+        using var fgBrush = new SolidBrush(fg);
         using var line = new Pen(Color.FromArgb(160, 160, 160), 1f);
         using var tick = new Pen(fg, 1f);
         using var cursorPen = new Pen(Color.Firebrick, 1f);
@@ -675,10 +712,14 @@ public sealed class CanvasControl : Control
             g.DrawLine(tick, isLabel ? 8 : RulerPx - 6, y, RulerPx - 1, y);
             if (isLabel)
             {
+                // GDI+ DrawString, not TextRenderer: TextRenderer is GDI and
+                // ignores the Graphics transform, so the rotated label was
+                // drawn unrotated at the strip's origin — under the corner
                 var st = g.Save();
-                g.TranslateTransform(0, y - 2);
+                g.TranslateTransform(1, y - 2);
                 g.RotateTransform(-90);
-                TextRenderer.DrawText(g, Num.F(Math.Round(u, 6)), font, new Point(0, 0), fg, TextFormatFlags.NoPadding);
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                g.DrawString(Num.F(Math.Round(u, 6)), font, fgBrush, 0, 0, StringFormat.GenericTypographic);
                 g.Restore(st);
             }
         }
@@ -751,7 +792,10 @@ public sealed class CanvasControl : Control
                     _doc?.Path is { } dp ? System.IO.Path.GetDirectoryName(dp) : null,
                     (int)o.GetNum("data-logo-scale", 0),
                     (string?)o.El.Attribute("data-dmshape") == "rect",
-                    (string?)o.El.Attribute("data-hri"));
+                    (string?)o.El.Attribute("data-hri"),
+                    (string?)o.El.Attribute("data-symsize"),
+                    LabelRenderer.HriStyle.From(o),
+                    LabelRenderer.ModuleLock(o));
                 if (!drawn)
                 {
                     using var hatch = new System.Drawing.Drawing2D.HatchBrush(
@@ -778,6 +822,11 @@ public sealed class CanvasControl : Control
             }
             case ObjectKind.Image:
             {
+                // the real image through the one renderer (print draws the
+                // same); an unreadable source shows a crossed box so the
+                // designer sees WHERE it is — print draws nothing there
+                if (LabelRenderer.DrawImage(g, o, _doc?.Path is { } ip ? System.IO.Path.GetDirectoryName(ip) : null))
+                    break;
                 var b = o.Bounds(_measurer);
                 g.DrawRectangle(Pens.DarkGray, (float)b.X, (float)b.Y, (float)b.W, (float)b.H);
                 g.DrawLine(Pens.DarkGray, (float)b.X, (float)b.Y, (float)b.Right, (float)b.Bottom);
@@ -848,6 +897,9 @@ public sealed class CanvasControl : Control
             return;
         }
         if (!primary || o.Kind == ObjectKind.Line) return;
+        // size-locked (data-lock-size): no resize handles drawn — the hit
+        // test below skips them too; drawing them would promise a resize
+        if ((string?)o.El.Attribute("data-lock-size") == "1") return;
         foreach (Core.Handle h in Enum.GetValues<Core.Handle>())
         {
             if (h == Core.Handle.Rotate) continue;
@@ -922,20 +974,28 @@ public sealed class CanvasControl : Control
             }
         }
 
-        // resize handles: single selection only
-        if (_sel.Count == 1 && Selected!.Kind != ObjectKind.Line)
+        // resize handles: single selection only; a size-locked element
+        // (data-lock-size, barcodes pinned to a spec dimension) has none —
+        // the hit falls through to a plain move
+        if (_sel.Count == 1 && Selected!.Kind != ObjectKind.Line &&
+            (string?)Selected.El.Attribute("data-lock-size") != "1")
         {
             var h = Geometry.HitHandle(w, Selected.Bounds(_measurer),
                 Selected.RotationDeg, Selected.RotationPivot, r);
             if (h is not null && h != Core.Handle.Rotate)
             {
                 _dragHandle = h; _dragPending = true; _downScreen = e.Location; _dragStartW = w;
+                _dragOrigBounds = Selected.Bounds(_measurer);   // Shift = keep THIS aspect
                 Capture = true; return;
             }
         }
 
         // an unlocked guide under the pointer: arm a guide drag (it starts
-        // past the dead-zone like any drag; a plain click leaves it be)
+        // past the dead-zone like any drag; a plain click leaves it be) —
+        // unless the pointer is on a SELECTED element: the selection is the
+        // topmost thing on the canvas, a guide crossing it never steals the
+        // drag (drag the guide from where it is clear of the selection)
+        if (SelectionFirstHit(w) is null)
         {
             int gi = HitGuide(e.Location);
             if (gi >= 0)
@@ -1428,11 +1488,30 @@ public sealed class CanvasControl : Control
 
         if (!_dragging && !_dragPending && !_marquee && _doc is not null && Mode == EditorMode.Design)
         {
-            // hover feedback: guides and rulers
+            // hover feedback, same precedence as OnMouseDown: a resize handle
+            // of the selection, the selected element itself (it is the
+            // topmost thing on the canvas, guides included), then guides
+            // and rulers
             char ru = RulerAt(e.Location);
-            int gi = ru == ' ' ? HitGuide(e.Location) : -1;
-            Cursor = gi >= 0 ? (_doc.View.Guides[gi].Vertical ? Cursors.VSplit : Cursors.HSplit)
-                   : ru is 'x' or 'y' && !_doc.View.GuidesLocked ? Cursors.Hand : Cursors.Default;
+            Cursor? cur = null;
+            if (ru == ' ' && HoverHandle(w) is { } hh)
+                cur = hh switch
+                {
+                    Core.Handle.N or Core.Handle.S => Cursors.SizeNS,
+                    Core.Handle.E or Core.Handle.W => Cursors.SizeWE,
+                    Core.Handle.NW or Core.Handle.SE => Cursors.SizeNWSE,
+                    Core.Handle.NE or Core.Handle.SW => Cursors.SizeNESW,
+                    _ => Cursors.SizeAll,
+                };
+            else if (ru == ' ' && SelectionFirstHit(w) is not null)
+                cur = Cursors.SizeAll;
+            if (cur is null)
+            {
+                int gi = ru == ' ' ? HitGuide(e.Location) : -1;
+                cur = gi >= 0 ? (_doc.View.Guides[gi].Vertical ? Cursors.VSplit : Cursors.HSplit)
+                    : ru is 'x' or 'y' && !_doc.View.GuidesLocked ? Cursors.Hand : Cursors.Default;
+            }
+            Cursor = cur;
         }
 
         if (_marquee)
@@ -1493,8 +1572,13 @@ public sealed class CanvasControl : Control
                 snapped = Redot(sp); _guides = guides;
             }
             SetSnapHint(noSnap, snapped, e.Location);
-            _doc.Undo.Push(s.Resize(
-                Geometry.ResizeBy(s.Bounds(_measurer), h, snapped, min: 10), _measurer));
+            var nr = Geometry.ResizeBy(s.Bounds(_measurer), h, snapped, min: 10);
+            // Shift: keep the aspect the element had when the drag started.
+            // Corners: the axis the mouse moved more decides, the opposite
+            // corner stays put. Edges: the other dimension follows, centered.
+            if (ModifierKeys.HasFlag(Keys.Shift) && _dragOrigBounds.W > 0 && _dragOrigBounds.H > 0)
+                nr = KeepAspect(nr, h, _dragOrigBounds.W / _dragOrigBounds.H);
+            _doc.Undo.Push(s.Resize(nr, _measurer, $"g{_gesture}"));   // one undo entry per drag
             Invalidate();
             return;
         }
@@ -1566,7 +1650,7 @@ public sealed class CanvasControl : Control
             && (string?)Selected.El.Attribute("data-tight") == "1"
             && LabelRenderer.TightBarcodeRect(Selected, _measurer) is { } tight)
         {
-            _doc.Undo.Push(Selected.Resize(tight, _measurer));
+            _doc.Undo.Push(Selected.Resize(tight, _measurer, $"g{_gesture}"));   // same gesture = same entry
             SelectionChanged?.Invoke(Selected);
         }
         _dragging = false; _dragPending = false; _panning = false; _marquee = false; _dragHandle = null;

@@ -6,7 +6,7 @@
 <svg xmlns="http://www.w3.org/2000/svg"
      width="3in" height="1in" viewBox="0 0 3000 1000">
   <metadata>
-    <etiq:label xmlns:etiq="https://etiquette.dev/ns/0.1">
+    <etiq:label xmlns:etiq="urn:etiquette:label:0.1">
       <etiq:field name="AssetName" source="prompt" caption="Asset name:" required="true"/>
       <etiq:field name="Location"  source="rest" connection="glpi"
                   query="search/Computer" pick="data[0].location"
