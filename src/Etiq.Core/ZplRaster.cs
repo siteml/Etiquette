@@ -42,7 +42,7 @@ public static class ZplRaster
     /// understood by every ZPL II printer incl. the shop's ZT230.
     /// </summary>
     public static string BuildJob(byte[] mono, int width, int height,
-                                  int copies = 1, bool compress = true)
+                                  int copies = 1, bool compress = true, string? prefix = null)
     {
         int stride = (width + 7) / 8;
         if (mono.Length != stride * height)
@@ -50,12 +50,37 @@ public static class ZplRaster
         string data = compress ? CompressHex(mono, stride) : PlainHex(mono);
         var sb = new StringBuilder();
         sb.Append("^XA");
+        if (!string.IsNullOrEmpty(prefix)) sb.Append(prefix);   // ^PW, media/mode commands
         sb.Append("^FO0,0");
         sb.Append($"^GFA,{mono.Length},{mono.Length},{stride},");
         sb.Append(data);
         sb.Append("^FS");
         if (copies != 1) sb.Append($"^PQ{copies}");
         sb.Append("^XZ");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// One RAW job for a whole batch (the continuous-set rule: every label
+    /// of a print goes to the queue in ONE write, so the printer runs them
+    /// as one set). Each distinct label is its own ^XA..^XZ block; a run
+    /// of consecutive identical labels collapses into one block with ^PQn
+    /// — the printer repeats from its own buffer, nothing is re-sent over
+    /// a slow link. Blocks are newline-separated (ZPL ignores it; captures
+    /// stay readable). prefix goes right after every ^XA (see BuildJob).
+    /// </summary>
+    public static string BuildBatch(IReadOnlyList<byte[]> labels, int width, int height,
+                                    string? prefix = null, bool compress = true)
+    {
+        var sb = new StringBuilder();
+        int i = 0;
+        while (i < labels.Count)
+        {
+            int n = 1;
+            while (i + n < labels.Count && labels[i + n].AsSpan().SequenceEqual(labels[i])) n++;
+            sb.Append(BuildJob(labels[i], width, height, n, compress, prefix)).Append('\n');
+            i += n;
+        }
         return sb.ToString();
     }
 

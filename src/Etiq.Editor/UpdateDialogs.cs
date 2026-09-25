@@ -181,58 +181,16 @@ public static class UpdateDialogs
             "fixed: N cells = a physical distance, zoom only thins the minors\n" +
             "follows zoom: as minors thin out the heavy lines thin with them,\n" +
             "so there are always N visible cells per heavy square");
-        // print offset, PER PRINTER: nudge that printer's output by (x, y)
-        // mils — a driver that mis-reports its hard margin puts the image a
-        // hair off; the correction belongs to the printer, not the machine
-        var offLbl = new Label { Text = "Print offset for:", Left = 14, Top = 162, Width = 130 };
-        var offPrinter = new ComboBox
-        {
-            Left = 150, Top = 158, Width = 264, DropDownStyle = ComboBoxStyle.DropDownList,
-        };
-        foreach (string pn in System.Drawing.Printing.PrinterSettings.InstalledPrinters)
-            offPrinter.Items.Add(pn);
-        var offX = new NumericUpDown
-        {
-            Left = 150, Top = 190, Width = 70, Minimum = -500, Maximum = 500,
-        };
-        var offXl = new Label { Text = "→ right (mils)", Left = 224, Top = 194, Width = 90 };
-        var offY = new NumericUpDown
-        {
-            Left = 316, Top = 190, Width = 70, Minimum = -500, Maximum = 500,
-        };
-        var offYl = new Label { Text = "↓ down", Left = 390, Top = 194, Width = 50 };
-        var edited = new Dictionary<string, (int X, int Y)>();   // pending per-printer edits
-        string? curPrinter = null;
-        void LoadOffset()
-        {
-            curPrinter = offPrinter.SelectedItem as string;
-            bool any = curPrinter is not null;
-            offX.Enabled = offY.Enabled = any;
-            if (!any) return;
-            var (x, y) = edited.TryGetValue(curPrinter!, out var e) ? e : PrintService.GetOffset(curPrinter!);
-            offX.Value = Math.Clamp(x, -500, 500);
-            offY.Value = Math.Clamp(y, -500, 500);
-        }
-        void StoreOffset()
-        {
-            if (curPrinter is not null) edited[curPrinter] = ((int)offX.Value, (int)offY.Value);
-        }
-        offPrinter.SelectedIndexChanged += (_, _) => LoadOffset();
-        offX.ValueChanged += (_, _) => StoreOffset();
-        offY.ValueChanged += (_, _) => StoreOffset();
-        try
-        {
-            string def = new System.Drawing.Printing.PrinterSettings().PrinterName;
-            offPrinter.SelectedItem = offPrinter.Items.Contains(def) ? def
-                                    : offPrinter.Items.Count > 0 ? offPrinter.Items[0] : null;
-        }
-        catch { if (offPrinter.Items.Count > 0) offPrinter.SelectedIndex = 0; }
-        LoadOffset();
+        // per-printer settings (offset, transport, darkness…) live in
+        // their own dialog — Help → Printer Settings…; this is the shortcut
+        var printers = new Button { Text = "Printer settings…", Left = 150, Top = 158, Width = 264 };
+        printers.Click += (_, _) => PrinterSetupDialog.Show(f);
+        var printersLbl = new Label { Text = "Per printer:", Left = 14, Top = 162, Width = 130 };
         var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 246, Top = 340, Width = 80 };
         var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 334, Top = 340, Width = 80 };
         f.Controls.AddRange(new Control[]
             { auto, flavorLbl, flavor, skipLbl, clear, recentLbl, recentNum, unitsLbl, units,
-              offLbl, offPrinter, offX, offXl, offY, offYl, gridLbl, gridPx, majorLbl, gridMajor, majorMode, sheetLbl, sheetOrient,
+              printersLbl, printers, gridLbl, gridPx, majorLbl, gridMajor, majorMode, sheetLbl, sheetOrient,
               ok, cancel });
         f.AcceptButton = ok;
         f.CancelButton = cancel;
@@ -247,7 +205,6 @@ public static class UpdateDialogs
             UnitPrefs.GridMajor = (int)gridMajor.Value;
             UnitPrefs.GridMajorAdaptive = majorMode.SelectedIndex == 1;
             UnitPrefs.SheetOrientation = sheetOrient.SelectedIndex switch { 1 => "portrait", 2 => "landscape", _ => "label" };
-            foreach (var (pn, (x, y)) in edited) PrintService.SetOffset(pn, x, y);
         }
     }
 }

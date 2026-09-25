@@ -2636,6 +2636,51 @@ Check("ZplRaster compression round-trips", () =>
     Assert(ZplRaster.DecodeGfData(plainData, stride, rows).SequenceEqual(mono), "plain hex round-trip");
 });
 
+Check("ZplRaster batch: one job, identical neighbours collapse into ^PQ, prefix after ^XA", () =>
+{
+    int stride = 2, rows = 3, w = 16;
+    var a = new byte[stride * rows]; a[0] = 0xF0;
+    var b = new byte[stride * rows]; b[5] = 0x0F;
+    var a2 = (byte[])a.Clone();
+    string job = ZplRaster.BuildBatch(new[] { a, a2, b, a }, w, rows, prefix: "^PW16^MMT");
+    AssertEq(3, job.Split("^XA").Length - 1, "three ^XA blocks (a×2, b, a)");
+    Assert(job.Contains("^XA^PW16^MMT^FO0,0^GFA"), "prefix right after ^XA");
+    Assert(job.Contains("^PQ2^XZ"), "two identical labels → ^PQ2");
+    AssertEq(1, job.Split("^PQ").Length - 1, "only the run carries ^PQ");
+    Assert(job.TrimEnd().EndsWith("^XZ"), "ends with ^XZ");
+    string single = ZplRaster.BuildJob(a, w, rows, prefix: "^PW16");
+    Assert(single.StartsWith("^XA^PW16^FO0,0"), "single job prefix");
+    Assert(!single.Contains("^PQ"), "one copy → no ^PQ");
+});
+
+Check("Registry: zpl-raster transport, queue lookup, rotate validation", () =>
+{
+    string dir = Path.Combine(Path.GetTempPath(), "etiq-reg-raw");
+    Directory.CreateDirectory(dir);
+    File.WriteAllText(Path.Combine(dir, "printers.json"), """
+        [{"name":"Zebra 105Se","dpi":203,"dotsPerMm":8,"widthMils":4090,"path":"zpl-raster",
+          "queue":"105Se 203dpi","rotate":90,"zpl":"^MMT^MNY"},
+         {"name":"ZT230","dpi":203,"dotsPerMm":8,"widthMils":4090,"path":"zpl"}]
+        """);
+    var reg = Registry.Load(dir);
+    var z = reg.ForQueue("105se 203DPI");
+    Assert(z is not null && z.Name == "Zebra 105Se", "queue match, case-insensitive");
+    Assert(z!.IsZplRaster, "zpl-raster transport");
+    AssertEq("105Se 203dpi", z.QueueName, "queue name");
+    AssertEq(90, z.Rotate ?? -1, "rotate");
+    AssertEq("^MMT^MNY", z.Zpl, "zpl prefix");
+    var t = reg.ForQueue("zt230");
+    Assert(t is not null && !t.IsZplRaster && t.QueueName == "ZT230", "name fallback, driver path");
+    Assert(reg.ForQueue("Brother HL-2240") is null, "unknown queue → null");
+    Assert(reg.ForQueue(null) is null, "null queue → null");
+    File.WriteAllText(Path.Combine(dir, "printers.json"), """
+        [{"name":"X","dpi":203,"widthMils":4090,"path":"zpl-raster","rotate":45}]
+        """);
+    bool threw = false;
+    try { Registry.Load(dir); } catch (InvalidDataException) { threw = true; }
+    Assert(threw, "rotate 45 rejected");
+});
+
 Check("QR / DataMatrix / PDF417 encoders (decode-verified vectors)", () =>
 {
     // hashes were locked in after every symbol below decoded correctly in

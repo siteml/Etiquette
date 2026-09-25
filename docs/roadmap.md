@@ -1,9 +1,26 @@
 # Roadmap
 
-Where Etiquette is and where it's going. Current release: **v0.12.0**
+Where Etiquette is and where it's going. Current release: **v0.13.0**
 (see the Releases page; `etiqedit` checks it via Help → Check for Updates).
 
 Legend: `[x]` done · `[~]` partially done · `[ ]` not started.
+
+## Shipped — v0.13.0
+
+- [x] **`zpl-raster` transport** — the renderer's 1-bit raster in `^GFA`
+      (Zebra alt compression), one RAW job per batch, `^PQ` for identical
+      runs, dot-snapped barcodes. Built for the 105Se on a USB→parallel
+      link where the driver's plain hex starved the head.
+- [x] **Help → Printer Settings…** — per-printer offset, transport
+      (driver / direct ZPL), print method, darkness, speed, rotation,
+      advanced ZPL; no `printers.json` needed.
+- [x] **One print job at a time** — Print greyed and File → Print off
+      while the last job (or anyone's job on that queue) is still in the
+      Windows spooler; lock held a few seconds past the queue; 20-minute
+      cap.
+- [x] **Printing popup** — "Sending N labels to X…" over the render/spool,
+      then "Printing N labels on X — wait for the printer to start…"
+      until the job leaves the queue; closes itself.
 
 ## Shipped — v0.12.0
 
@@ -220,7 +237,10 @@ boundary exists.
 ## Print engine — remaining
 
 - [ ] PDF export path
-- [ ] Live thermal print test on the ZT230 (raw-ZPL `^GF` path)
+- [x] **`zpl-raster` transport** — shipped in v0.13.0 (per-printer via
+      Help → Printer Settings… or `printers.json`).
+- [ ] Live print test of the `zpl-raster` path on the 105Se (rotation
+      direction, `^MM`/`^MN` prefix, print offset), then the ZT230
 - [ ] Epicor Kinetic Function created per tenant per `docs/counters.md`
 - [ ] Production counter store (replacing the temp-file serial store)
 

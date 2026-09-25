@@ -177,6 +177,7 @@ public sealed class MainForm : Form
         FormClosing += (_, e) => { if (!ConfirmDiscard()) e.Cancel = true; };
 
         WireDragDrop();
+        PrintQueueGuard.Changed += OnPrintQueueChanged;
     }
 
     // ---- drag & drop (QoL): an .svg dropped on the window = open it as
@@ -709,7 +710,8 @@ public sealed class MainForm : Form
         {
             bool doc = _doc is not null;
             miClose.Enabled = miSave.Enabled = miSaveAs.Enabled = doc;
-            miPrint.Enabled = miValidate.Enabled = doc;
+            miValidate.Enabled = doc;
+            miPrint.Enabled = doc && !PrintQueueGuard.Busy;
             RebuildRecentMenu(recent);
         };
         RebuildRecentMenu(recent);   // populated before first open too
@@ -936,6 +938,7 @@ public sealed class MainForm : Form
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add("Check for &Updates…", null, async (_, _) => await CheckForUpdates(interactive: true));
         help.DropDownItems.Add("&Options…", null, (_, _) => UpdateDialogs.ShowOptions(this));
+        help.DropDownItems.Add("&Printer Settings…", null, (_, _) => PrinterSetupDialog.Show(this));
         help.DropDownItems.Add("Last &Print Details…", null, (_, _) =>
             MessageBox.Show(this, PrintService.LastInfo ?? "Nothing printed yet this session.",
                 "Last print", MessageBoxButtons.OK, MessageBoxIcon.Information));
@@ -1387,6 +1390,32 @@ public sealed class MainForm : Form
         _statusDoc.Text = info;   // survives until the next size/selection change; Help → Last Print Details… keeps it
     }
 
+    /// <summary>Print buttons of the current data panel — greyed while a
+    /// job of ours is still in the queue (PrintQueueGuard), so an
+    /// impatient second click cannot pile a batch behind the first.</summary>
+    private readonly List<Button> _printButtons = new();
+
+    /// <summary>Point the queue guard at the printer this panel prints to
+    /// (named, embedded pick, or the machine default).</summary>
+    private void WatchPanelPrinter(EtiqTemplate.PanelDef panel)
+    {
+        string? p = PanelPrinter(panel);
+        if (p is null)
+            try { var d = new System.Drawing.Printing.PrinterSettings(); if (d.IsValid) p = d.PrinterName; } catch { }
+        PrintQueueGuard.WatchPrinter(p);
+    }
+
+    private void OnPrintQueueChanged()
+    {
+        bool busy = PrintQueueGuard.Busy;
+        foreach (var b in _printButtons)
+            if (!b.IsDisposed) b.Enabled = !busy;
+        if (busy) _statusDoc.Text = PrintQueueGuard.Describe() ?? "Printing…";
+        else if (_statusDoc.Text.StartsWith("Printing ", StringComparison.Ordinal) ||
+                 _statusDoc.Text.StartsWith("Printer ", StringComparison.Ordinal))
+            _statusDoc.Text = "Printer free — ready to print";
+    }
+
     /// <summary>Effective printer for direct printing: embedded picker
     /// (null while "Default printer" is checked), else the pinned name,
     /// else null = machine default.</summary>
@@ -1676,8 +1705,13 @@ public sealed class MainForm : Form
 
     private void UpdateTitle()
     {
-        var ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
-        string app = $"Etiquette Designer {ver?.ToString(3)}";
+        // informational version = <Version> verbatim (test-build suffix
+        // included, SourceLink "+sha" stripped); assembly version otherwise
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        string? info = asm.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion;
+        if (info is not null && info.IndexOf('+') is int plus && plus >= 0) info = info[..plus];
+        string app = $"Etiquette Designer {(string.IsNullOrWhiteSpace(info) ? asm.GetName().Version?.ToString(3) : info)}";
         if (_doc is null) { Text = app; return; }
         string name = _doc.Path is null ? "(unsaved)" : Path.GetFileName(_doc.Path);
         Text = $"{name}{(_doc.IsDirty ? "*" : "")} — {app}";
@@ -2150,6 +2184,7 @@ public sealed class MainForm : Form
         var panel = template.Panel;
         _panelCopies = null; _panelCollate = null;   // recreated below if embedded
         _panelPrinterDefault = null; _panelPrinterBox = null;
+        PrintQueueGuard.WatchPrinter(null);           // re-pointed once the panel's printer is known
 
         AddLabel("DATA MODE — layout locked");
         y += S(8);
@@ -2347,7 +2382,8 @@ public sealed class MainForm : Form
                 if (def.IsValid) pick.SelectedItem = def.PrinterName;
             }
             catch { /* spooler trouble: list stays empty */ }
-            dflt.CheckedChanged += (_, _) => pick.Enabled = !dflt.Checked;
+            dflt.CheckedChanged += (_, _) => { pick.Enabled = !dflt.Checked; WatchPanelPrinter(panel); };
+            pick.SelectedIndexChanged += (_, _) => WatchPanelPrinter(panel);
             _dataPanel.Controls.Add(dflt);
             _dataPanel.Controls.Add(pick);
             _panelPrinterDefault = dflt; _panelPrinterBox = pick;
@@ -2359,14 +2395,18 @@ public sealed class MainForm : Form
         void EmitButtons()
         {
             int x = S(10);
-            void Btn(string text, int w, Action onClick)
+            Button Btn(string text, int w, Action onClick)
             {
                 if (x + S(w) > S(330)) { x = S(10); y += S(34); }   // wrap
                 var b = new Button { Text = text, Left = x, Top = y + S(6), Width = S(w), Height = S(28) };
                 b.Click += (_, _) => onClick();
                 _dataPanel.Controls.Add(b);
                 x += S(w) + S(6);
+                return b;
             }
+            _printButtons.Clear();
+            WatchPanelPrinter(panel);
+            void TrackPrint(Button b) { b.Enabled = !PrintQueueGuard.Busy; _printButtons.Add(b); }
             foreach (var kind in panel.Buttons)
                 switch (kind)
                 {
@@ -2375,20 +2415,20 @@ public sealed class MainForm : Form
                             { _sources.Clear(); _listRowFails.Clear(); _listRowSig.Clear(); _listRowSets.Clear(); await RefreshPreviewAsync(template); });
                         break;
                     case "print":
-                        Btn(panel.Print == "direct" ? "Print" : "Print…", 90, async () =>
+                        TrackPrint(Btn(panel.Print == "direct" ? "Print" : "Print…", 90, async () =>
                         {
                             // a fresh snapshot, and no error on any bound
                             // field (`required` = required for PRINTING)
                             if (!await FreshPreviewAsync(template)) return;
                             PrintNow(panel, PanelRun(panel).Copies);
-                        });
+                        }));
                         break;
                     case "printall":
                         foreach (var l in template.Lists.Where(l => l.Rows.Count > 0))
                         {
                             var list = l;
-                            Btn($"Print All: {l.Name} ({l.Rows.Count})…", 300,
-                                () => PrintAllRows(template, list));
+                            TrackPrint(Btn($"Print All: {l.Name} ({l.Rows.Count})…", 300,
+                                () => PrintAllRows(template, list)));
                         }
                         break;
                     case "log":

@@ -9,8 +9,10 @@
     <RootNamespace>Etiq.Editor</RootNamespace>
     <AssemblyName>etiqedit</AssemblyName>
     <!-- bump per release; Check for Updates compares this against the
-         latest GitHub release tag (vX.Y.Z) -->
-    <Version>0.12.0</Version>
+         latest GitHub release tag (vX.Y.Z). A "-suffix" marks a TEST build:
+         the title bar shows it (informational version), the updater sees
+         only the numeric part -->
+    <Version>0.13.0</Version>
     <!-- lets the shell compile-check on non-Windows build agents;
          harmless on Windows -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>

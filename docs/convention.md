@@ -814,8 +814,21 @@ Engine pipeline: resolve fields → substitute text → generate barcode vectors
 - **driver path** (any Windows printer): render at the queue's native DPI,
   1:1 dot mapping, explicit DEVMODE resolution; barcodes drawn module-snapped
   and un-antialiased
-- **raw thermal path**: 203/300 dpi mono raster wrapped in ZPL (`^GF`), or
-  native commands where fidelity allows
+- **raw thermal path** (`zpl-raster`, shipped): the same renderer draws
+  each label into a 1-bit raster at the head density, wrapped in `^GFA`
+  with Zebra's alternative compression (`G–Y`/`g–z` repeat counts, `,`/`!`
+  rest-of-row white/black, `:` repeat row) and written RAW to the Windows
+  queue as ONE document per batch — the printer runs the set continuously,
+  and a run of identical labels is sent once with `^PQn`. No ZPL fonts or
+  barcode commands: what the preview shows is what prints. Chosen per
+  printer in `config/printers.json`: `"path": "zpl-raster"`, optional
+  `"queue"` (Windows queue name when it differs from the registry name),
+  `"rotate"` (0/90/180/270 clockwise; absent = auto: 270 when the label
+  only fits the head edge-first — the driver's Landscape) and `"zpl"` (commands inserted after
+  every `^XA`, e.g. `^MMT^MNY^MTT^MD24^PR3`; absent = the printer's stored
+  settings stand, only `^PW` is always sent). The per-printer print offset
+  (Help → Options) applies as on the driver path. Native commands where
+  fidelity allows remain a later option.
 - **PDF**: same render to file, for proofs/archive
 
 ## Validation (`etiq validate`)

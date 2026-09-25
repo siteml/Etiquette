@@ -13,7 +13,29 @@ public sealed class PrinterDef
     public string Name { get; set; } = "";
     public int Dpi { get; set; }
     public int WidthMils { get; set; }              // max print width
-    public string Path { get; set; } = "driver";    // driver | zpl | tpcl | bpac
+    /// <summary>Transport: "driver" (GDI through the Windows driver, the
+    /// default) | "zpl-raster" (the editor renders a 1-bit raster at the
+    /// head density, wraps it in ^GFA with Zebra's alt compression and
+    /// writes it RAW to the queue — for Zebras whose driver sends plain
+    /// hex over a slow link, e.g. a 105Se on a USB→parallel adapter) |
+    /// "zpl" / "tpcl" / "bpac" (descriptive only today). See docs/convention.md
+    /// PRINTING.</summary>
+    public string Path { get; set; } = "driver";
+    /// <summary>Windows queue name when it differs from Name (the registry
+    /// name is the shop's, the queue is per machine). Absent → Name.</summary>
+    public string? Queue { get; set; }
+    /// <summary>zpl-raster only: raster rotation in degrees (0, 90, 180,
+    /// 270; clockwise). Absent → auto: 270 when the label is wider than the
+    /// head but fits rotated, else 0 — the same flip the driver path gets
+    /// from Landscape. Set 90 if the label comes out upside down.</summary>
+    public int? Rotate { get; set; }
+    /// <summary>zpl-raster only: extra ZPL inserted right after ^XA in
+    /// every label block (e.g. "^MMT^MNY^MTT^MD24^PR3"). Absent → the
+    /// printer's stored settings stand; ^PW is always sent.</summary>
+    public string? Zpl { get; set; }
+    /// <summary>Queue this entry prints to (Queue, else Name).</summary>
+    public string QueueName => string.IsNullOrWhiteSpace(Queue) ? Name : Queue;
+    public bool IsZplRaster => string.Equals(Path, "zpl-raster", StringComparison.OrdinalIgnoreCase);
     /// <summary>Exact head density when the nominal dpi lies: a "203 dpi"
     /// Zebra/Toshiba head is 8 dots/mm = 203.2 dpi. Optional; absent →
     /// derived from Dpi. The editor's dot grid uses the effective value.</summary>
@@ -51,6 +73,8 @@ public sealed class Registry
             {
                 if (p.Name == "" || p.Dpi <= 0 || p.WidthMils <= 0)
                     throw new InvalidDataException($"printers.json: '{p.Name}' needs name, dpi, widthMils");
+                if (p.Rotate is int rot && rot is not (0 or 90 or 180 or 270))
+                    throw new InvalidDataException($"printers.json: '{p.Name}' rotate must be 0, 90, 180 or 270");
                 if (!r.Printers.TryAdd(p.Name, p))
                     throw new InvalidDataException($"printers.json: duplicate '{p.Name}'");
             }
@@ -64,6 +88,17 @@ public sealed class Registry
                     throw new InvalidDataException($"media.json: duplicate '{m.Name}'");
             }
         return r;
+    }
+
+    /// <summary>The entry that prints to a Windows queue: explicit `queue`
+    /// match first, then registry name, case-insensitive; null when the
+    /// queue is not in the registry (→ driver path, as before).</summary>
+    public PrinterDef? ForQueue(string? queue)
+    {
+        if (string.IsNullOrWhiteSpace(queue)) return null;
+        return Printers.Values.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Queue) &&
+                                                   string.Equals(p.Queue, queue, StringComparison.OrdinalIgnoreCase))
+            ?? (Printers.TryGetValue(queue, out var byName) ? byName : null);
     }
 }
 

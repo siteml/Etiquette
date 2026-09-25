@@ -24,9 +24,11 @@ apart:
   embedded pick lists.
 - **Printing** happens straight from the designer (or the `etiq` CLI):
   merge data into the template, generate barcodes, print via any Windows
-  printer driver — plus a ZPL raster path for thermal printers.
+  printer driver — or straight to a Zebra as a compressed ZPL raster,
+  one continuous job per batch. One print job at a time per queue, with
+  a printing popup that clears when the printer has the job.
 
-## What it does today (v0.12)
+## What it does today (v0.13)
 
 - **Barcodes, dependency-free:** Code 128, GS1-128, Code 39 (+extended),
   ITF-14, QR (versions 1–40, all ECC levels), rMQR, Aztec, DataMatrix

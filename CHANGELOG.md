@@ -4,6 +4,53 @@ All notable changes to Etiquette are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver
 (pre-1.0: minor bumps may change behavior).
 
+## [0.13.0] — 2026-09-25
+
+### Added
+- **`zpl-raster` print transport** (`config/printers.json` → `"path":
+  "zpl-raster"`): the editor's own renderer draws each label into a 1-bit
+  raster at the printer's head density, wraps it in `^GFA` with Zebra's
+  alternative compression (repeat counts, rest-of-row and repeat-row
+  shortcuts — the scheme from the shop's BarTender captures) and writes
+  the whole batch to the Windows queue as one RAW document, so the set
+  runs continuously and identical labels in a row are sent once with
+  `^PQ`. Built for a Zebra 105Se behind a USB→parallel adapter, where
+  the driver's uncompressed hex could not keep the printhead fed. Same
+  preview, same log rows, same spool watch; per-printer `queue` (Windows
+  name when it differs), `rotate` (0/90/180/270, default auto) and `zpl`
+  (commands after every `^XA`) settings. Help → Last Print Details shows
+  the raster size, rotation, block count and bytes sent.
+- **Help → Printer Settings…** (also a button in Options): everything
+  remembered per Windows printer, in plain words — print offset, how to
+  print (Windows driver / send the image directly to a Zebra), and for
+  direct printing the things the driver used to decide per job: print
+  method (ribbon / no ribbon), darkness 0–30, speed, label rotation. The
+  generated ZPL is shown; an Advanced box takes literal commands. No
+  `printers.json` needed (an entry there still supplies dpi/print width;
+  the dialog's choices win over its `path`/`rotate`/`zpl`).
+- **One print job at a time.** While the last job is still in the Windows
+  queue the data panel's Print / Print All buttons are greyed, File → Print
+  is disabled and the status line says what is printing and on which
+  printer; a print attempt meanwhile gets a "Still printing" message. Ends
+  the jammed queues from operators re-sending a 100-label batch because
+  the printer had not started yet. A job that errors (paper out, cover
+  open) keeps the lock until it is cleared or finishes; a 20-minute cap
+  releases it if the spooler hangs. The panel's printer queue is watched
+  as a whole, so jobs from another station or another program count too:
+  one queue, one job at a time, whoever sent it. The lock stays on for a
+  few seconds after the job has left the queue (the spooler is done then,
+  the printer is only starting), and the status line says so.
+- **Printing popup** (both transports): "Sending N labels to <printer>…"
+  while the batch is rendered and spooled (a big job shows a message
+  instead of a frozen form, and a second click cannot slip in), then
+  "Printing N labels on <printer> — wait for the printer to start…" until
+  the job has left the Windows queue, when it closes by itself. The popup
+  going away is the cue that the next batch may be sent.
+- On the ZPL raster transport **barcodes are dot-snapped**: every module is
+  a whole number of printer dots, bar edges and matrix modules sit on the
+  dot grid (symbol centered in its box, a hair smaller when the box is not
+  a dot multiple) — no anti-aliased edge dots, crisp bars.
+
 ## [0.12.0] — 2026-09-14
 
 ### Added

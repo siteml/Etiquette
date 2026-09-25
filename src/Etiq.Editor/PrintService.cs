@@ -7,9 +7,10 @@ namespace Etiq.Editor;
 /// <summary>
 /// Phase 3 native print path: renders the document through LabelRenderer
 /// straight onto the printer driver's Graphics (GDI+, same engine as the
-/// canvas — WYSIWYG by construction). No raw printer commands, no NuGet:
-/// works on Zebra/Toshiba/office printers exactly like labelprint's GDI
-/// mode does today.
+/// canvas — WYSIWYG by construction). No NuGet: works on Zebra/Toshiba/
+/// office printers exactly like labelprint's GDI mode does today. A
+/// registry printer with path "zpl-raster" takes the RAW transport
+/// instead (RawZplPrinter) — same renderer, no driver in the loop.
 /// </summary>
 public static class PrintService
 {
@@ -51,6 +52,112 @@ public static class PrintService
     public static void SetOffset(string printer, int x, int y) =>
         UpdateChecker.SetSetting("printOffset:" + printer, x == 0 && y == 0 ? null : $"{x},{y}");
 
+    /// <summary>Per-PRINTER transport chosen in Help → Options
+    /// ("printTransport:<queue>" = "zpl-raster" | "driver"; absent = ""
+    /// → whatever config/printers.json says, else the driver). The in-app
+    /// choice always wins over the registry.</summary>
+    public static string GetTransport(string printer) =>
+        UpdateChecker.GetSetting("printTransport:" + printer) ?? "";
+
+    public static void SetTransport(string printer, string? transport) =>
+        UpdateChecker.SetSetting("printTransport:" + printer,
+            transport is "zpl-raster" or "driver" ? transport : null);
+
+    /// <summary>Per-PRINTER raster rotation for the zpl-raster transport
+    /// ("printRotate:<queue>" = "0" | "90" | "180" | "270"; absent/"auto"
+    /// → the registry's rotate, else automatic).</summary>
+    public static string GetRotate(string printer) =>
+        UpdateChecker.GetSetting("printRotate:" + printer) ?? "auto";
+
+    public static void SetRotate(string printer, string? rotate) =>
+        UpdateChecker.SetSetting("printRotate:" + printer,
+            rotate is "0" or "90" or "180" or "270" ? rotate : null);
+
+    /// <summary>Per-PRINTER print method for the raster transport:
+    /// "" (printer's setting) | "transfer" (^MTT, ribbon) | "direct" (^MTD).</summary>
+    public static string GetMedia(string printer) => UpdateChecker.GetSetting("printMedia:" + printer) ?? "";
+    public static void SetMedia(string printer, string? media) =>
+        UpdateChecker.SetSetting("printMedia:" + printer, media is "transfer" or "direct" ? media : null);
+
+    /// <summary>Per-PRINTER darkness 0–30 (~SD), -1 = printer's setting.</summary>
+    public static int GetDarkness(string printer) =>
+        int.TryParse(UpdateChecker.GetSetting("printDarkness:" + printer), out int d) && d is >= 0 and <= 30 ? d : -1;
+    public static void SetDarkness(string printer, int darkness) =>
+        UpdateChecker.SetSetting("printDarkness:" + printer, darkness is >= 0 and <= 30 ? darkness.ToString() : null);
+
+    /// <summary>Per-PRINTER speed in in/s 2–6 (^PR), 0 = printer's setting.</summary>
+    public static int GetSpeed(string printer) =>
+        int.TryParse(UpdateChecker.GetSetting("printSpeed:" + printer), out int s) && s is >= 2 and <= 6 ? s : 0;
+    public static void SetSpeed(string printer, int speed) =>
+        UpdateChecker.SetSetting("printSpeed:" + printer, speed is >= 2 and <= 6 ? speed.ToString() : null);
+
+    /// <summary>The ZPL the plain-words settings amount to (after ^XA of
+    /// every label): print method, darkness, speed, then any literal
+    /// extra. Empty when nothing is set.</summary>
+    public static string ComposeZplPrefix(string media, int darkness, int speed, string? extra)
+    {
+        var sb = new System.Text.StringBuilder();
+        if (media == "transfer") sb.Append("^MTT");
+        else if (media == "direct") sb.Append("^MTD");
+        if (darkness is >= 0 and <= 30) sb.Append("~SD").Append(darkness.ToString("00"));
+        if (speed is >= 2 and <= 6) sb.Append("^PR").Append(speed);
+        if (!string.IsNullOrWhiteSpace(extra)) sb.Append(extra.Trim());
+        return sb.ToString();
+    }
+
+    /// <summary>Per-PRINTER "printZpl:<queue>": ZPL inserted after every ^XA
+    /// on the raster transport — darkness ^MDn, speed ^PRn, mode ^MMT…
+    /// (what the driver used to send per job). Empty → the registry's
+    /// `zpl`, else nothing (the printer's stored settings).</summary>
+    public static string GetZpl(string printer) => UpdateChecker.GetSetting("printZpl:" + printer) ?? "";
+    public static void SetZpl(string printer, string? zpl) =>
+        UpdateChecker.SetSetting("printZpl:" + printer, string.IsNullOrWhiteSpace(zpl) ? null : zpl.Trim());
+
+    /// <summary>Per-PRINTER "printZplHex:<queue>" = "1": send ^GFA as plain
+    /// hex instead of the compressed stream — slow, for isolating a
+    /// printer that mis-decodes the compression.</summary>
+    public static bool GetPlainHex(string printer) => UpdateChecker.GetSetting("printZplHex:" + printer) == "1";
+    public static void SetPlainHex(string printer, bool plain) =>
+        UpdateChecker.SetSetting("printZplHex:" + printer, plain ? "1" : null);
+
+    /// <summary>The zpl-raster definition a queue prints under, or null for
+    /// the driver path. Options setting first, then the registry entry for
+    /// the queue. With no registry entry the definition is synthesized
+    /// from the driver: its reported resolution (203 dpi → 8 dots/mm) and
+    /// its default form's short side as the print width (fallback 4 in).</summary>
+    private static PrinterDef? RawDefFor(string queue, PrinterSettings ps)
+    {
+        var reg = EditorRegistry.Load().ForQueue(queue);
+        string t = GetTransport(queue);
+        bool raw = t == "zpl-raster" || (t == "" && reg?.IsZplRaster == true);
+        if (!raw) return null;
+        PrinterDef def;
+        if (reg is not null) def = reg;
+        else
+        {
+            int dpi = 203, width = 4090;
+            try
+            {
+                dpi = ps.DefaultPageSettings.PrinterResolution.X is > 0 and var d ? d : 203;
+                var form = new PrinterSettings { PrinterName = queue }.DefaultPageSettings.PaperSize;
+                int shortSide = Math.Min(form.Width, form.Height) * 10;   // hundredths → mils
+                if (shortSide > 0 && shortSide <= 8500) width = shortSide;
+            }
+            catch { /* driver unreachable: defaults */ }
+            def = new PrinterDef
+            {
+                Name = queue, Dpi = dpi, WidthMils = width, Path = "zpl-raster",
+                DotsPerMm = dpi == 203 ? 8 : dpi == 300 ? 11.81 : null,
+            };
+        }
+        if (int.TryParse(GetRotate(queue), out int deg)) def.Rotate = deg;   // Options wins over the registry
+        // plain-words settings compose the prefix; only when NONE is set
+        // does the registry's literal `zpl` stand
+        string composed = ComposeZplPrefix(GetMedia(queue), GetDarkness(queue), GetSpeed(queue), GetZpl(queue));
+        if (composed.Length > 0) def.Zpl = composed;
+        return def;
+    }
+
     /// <summary>One label. values=null prints the sample text as drawn
     /// (Design mode).</summary>
     public static void Print(IWin32Window owner, EditorDoc doc,
@@ -84,6 +191,13 @@ public static class PrintService
     {
         LastInfo = null;
         if (pages.Count == 0) return;
+        // one job at a time: while the last one is still in the queue a
+        // second click would only pile up behind it (PrintQueueGuard)
+        if (PrintQueueGuard.Describe() is { } busy)
+        {
+            MessageBox.Show(owner, busy + ".", "Still printing", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
         var records = pages;   // the distinct labels, as logged — pages may be expanded
         if (copies > 1)
         {
@@ -229,6 +343,24 @@ public static class PrintService
                 }
             }
         }
+        // TRANSPORT: Help → Options (or a registry entry) puts this queue
+        // on "zpl-raster" — bypasses the driver: same renderer, 1-bit
+        // raster at the head density, ^GFA with Zebra's alt compression,
+        // ONE RAW job for the whole batch (RawZplPrinter). Else GDI.
+        string queue = pd.PrinterSettings.PrinterName;
+        // shared printer: nothing goes behind a job that is still in the
+        // queue, whoever sent it (another station, another program)
+        if (PrintQueueGuard.WhyBlocked(queue) is { } blocked)
+        {
+            MessageBox.Show(owner, blocked + ".", "Printer busy", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (RawDefFor(queue, pd.PrinterSettings) is { } rawDef)
+        {
+            PrintRaw(owner, doc, pages, records, measurer, rawDef, queue, pd.DocumentName, job, template, copies);
+            return;
+        }
+        WaitBox? box = null;
         try
         {
             // a printer change (direct: PrinterName; dialog: user pick)
@@ -281,20 +413,71 @@ public static class PrintService
                        $"offset {offX}/{offY} mils, {pages.Count} page(s), " +
                        $"{(sheet ? "standard controller (ResetDC per page)" : "label controller (one DEVMODE, no ResetDC)")}" +
                        (copies > 1 ? $" ({copies} copies expanded, driver copies=1)" : "");
+            string printerName = pd.PrinterSettings.PrinterName;
+            // the render + spool holds the UI thread for a few seconds on a
+            // big batch: a popup says so (and swallows clicks) instead of
+            // a frozen form; it then stays up until the job has left the
+            // queue (WaitBox.WatchQueue) and closes itself
+            string n = $"{pages.Count} label{(pages.Count == 1 ? "" : "s")}";
+            box = WaitBox.Show(owner, $"Sending {n} to {printerName}…");
             pd.Print();
             // spooled ≠ printed: log each label's values (the reprintable
             // record), then watch the queue for the job's real fate
-            string printerName = pd.PrinterSettings.PrinterName;
             for (int i = 0; i < records.Count; i++)
                 PrintLog.Append(job, "spooled", template, printerName,
                                 page: i + 1, pages: records.Count, values: records[i], copies: copies);
             if (PrintLog.Directory is not null)
                 SpoolWatcher.Watch(printerName, pd.DocumentName, job, template);
+            PrintQueueGuard.Track(printerName, pd.DocumentName, pages.Count);
+            box.WatchQueue($"Printing {n} on {printerName} — wait for the printer to start…");
         }
         catch (Exception ex)
         {
+            box?.Dispose();
             PrintLog.Append(job, "error", template, pd.PrinterSettings.PrinterName,
                             detail: "print call failed: " + ex.Message);
+            MessageBox.Show(owner, ex.Message, "Print failed");
+        }
+    }
+
+    /// <summary>The zpl-raster transport's half of PrintBatch: render +
+    /// RAW write, then the same log rows and spool watch the driver path
+    /// gets (the RAW document carries the same DocumentName, so the
+    /// watcher finds it in the queue by the same key).</summary>
+    private static void PrintRaw(IWin32Window owner, EditorDoc doc,
+                                 IReadOnlyList<IReadOnlyDictionary<string, string>?> pages,
+                                 IReadOnlyList<IReadOnlyDictionary<string, string>?> records,
+                                 ITextMeasurer measurer, PrinterDef def, string queue,
+                                 string documentName, string job, string template, int copies)
+    {
+        WaitBox? box = null;
+        string n = $"{pages.Count} label{(pages.Count == 1 ? "" : "s")}";
+        try
+        {
+            var off = GetOffset(queue);
+            bool plain = GetPlainHex(queue);
+            box = WaitBox.Show(owner, $"Sending {n} to {queue}…");
+            var r = RawZplPrinter.Print(doc, pages, measurer, def, queue, documentName, off, compress: !plain);
+            LastInfo = $"zpl-raster mode → {queue}: raster {r.Width}×{r.Height} dots at " +
+                       $"{Num.F(Math.Round(def.DotsPerMmEffective, 2))} dots/mm" +
+                       (r.Rotate != 0 ? $", rotated {r.Rotate}°{(def.Rotate is null ? " (auto)" : "")}" : ", not rotated") +
+                       $", offset {off.X}/{off.Y} mils, {pages.Count} label(s) in {r.Blocks} ^XA block(s), " +
+                       $"{r.Bytes:N0} bytes RAW ({(plain ? "plain hex" : "compressed")}), one job" +
+                       $", prefix ^PW{r.Width}{def.Zpl}" +
+                       (copies > 1 ? $" ({copies} copies expanded)" : "") +
+                       (r.Dump is null ? "" : $"; raster PNG + ZPL dumped beside {r.Dump}");
+            for (int i = 0; i < records.Count; i++)
+                PrintLog.Append(job, "spooled", template, queue,
+                                page: i + 1, pages: records.Count, values: records[i], copies: copies);
+            if (PrintLog.Directory is not null)
+                SpoolWatcher.Watch(queue, documentName, job, template);
+            PrintQueueGuard.Track(queue, documentName, pages.Count);
+            box.WatchQueue($"Printing {n} on {queue} — wait for the printer to start…");
+        }
+        catch (Exception ex)
+        {
+            box?.Dispose();
+            PrintLog.Append(job, "error", template, queue, detail: "zpl-raster print failed: " + ex.Message);
             MessageBox.Show(owner, ex.Message, "Print failed");
         }
     }

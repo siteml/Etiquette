@@ -64,9 +64,28 @@ internal static class SpoolWatcher
         });
     }
 
+    /// <summary>How many jobs (anyone's, any program's) sit in the queue.
+    /// -1 when the queue cannot be read.</summary>
+    internal static int QueueJobCount(string printer)
+    {
+        if (!OpenPrinter(printer, out var h, IntPtr.Zero)) return -1;
+        try
+        {
+            EnumJobs(h, 0, 255, 1, IntPtr.Zero, 0, out int needed, out _);
+            if (needed == 0) return 0;
+            IntPtr buf = Marshal.AllocHGlobal(needed);
+            try
+            {
+                return EnumJobs(h, 0, 255, 1, buf, needed, out _, out int count) ? count : -1;
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+        finally { ClosePrinter(h); }
+    }
+
     /// <summary>The job's status flags, or null when no job with that
     /// document name is in the queue.</summary>
-    private static int? FindJobStatus(string printer, string documentName)
+    internal static int? FindJobStatus(string printer, string documentName)
     {
         if (!OpenPrinter(printer, out var h, IntPtr.Zero)) return null;
         try

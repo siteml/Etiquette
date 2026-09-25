@@ -14,9 +14,14 @@ namespace Etiq.Editor;
 /// </summary>
 public static class LabelRenderer
 {
+    /// <summary>dotPitch (world units per printer dot, 0 = off) snaps
+    /// barcode modules to whole dots: every module the same integer dot
+    /// count, edges on the dot grid — crisp bars on a raster transport.
+    /// The caller must map world 0 onto a whole device dot (RawZplPrinter
+    /// does). Canvas/preview leave it 0.</summary>
     public static void Draw(Graphics g, EditorDoc doc,
                             IReadOnlyDictionary<string, string>? values,
-                            ITextMeasurer measurer)
+                            ITextMeasurer measurer, double dotPitch = 0)
     {
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
@@ -25,13 +30,13 @@ public static class LabelRenderer
         {
             var layer = o.Layer;
             if (layer is not null && (!layer.Visible || !layer.Printed)) continue;
-            DrawObject(g, o, values, measurer, baseDir);
+            DrawObject(g, o, values, measurer, baseDir, dotPitch);
         }
     }
 
     private static void DrawObject(Graphics g, EditorObject o,
                                    IReadOnlyDictionary<string, string>? values,
-                                   ITextMeasurer measurer, string? baseDir)
+                                   ITextMeasurer measurer, string? baseDir, double dotPitch = 0)
     {
         double rot = o.RotationDeg;
         var state = g.Save();
@@ -82,7 +87,8 @@ public static class LabelRenderer
                         (string?)o.El.Attribute("data-hri"),
                         (string?)o.El.Attribute("data-symsize"),
                         HriStyle.From(o),
-                        ModuleLock(o));
+                        ModuleLock(o),
+                        dotPitch: dotPitch);
                     break;
                 }
                 case ObjectKind.Text:
@@ -326,7 +332,8 @@ public static class LabelRenderer
                                    string? logo = null, string? baseDir = null,
                                    int logoScale = 0, bool dmRect = false,
                                    string? hri = null, string? symSize = null,
-                                   HriStyle? hriStyle = null, double moduleLock = 0)
+                                   HriStyle? hriStyle = null, double moduleLock = 0,
+                                   double dotPitch = 0)
     {
         if (string.IsNullOrEmpty(content)) return false;
         var mods = TryEncode(symbology, content);
@@ -361,7 +368,7 @@ public static class LabelRenderer
                 if (w <= barBox.W + 0.01)
                     barBox = new RectD(barBox.X + (barBox.W - w) / 2, barBox.Y, w, barBox.H);
             }
-            DrawBars(g, barBox, mods);
+            DrawBars(g, barBox, mods, dotPitch);
             return true;
         }
         bool withLogo = symbology == "qr" && !string.IsNullOrEmpty(logo);
@@ -382,7 +389,7 @@ public static class LabelRenderer
                 mbox = new RectD(box.X + (box.W - w) / 2, box.Y + (box.H - h) / 2, w, h);
         }
         var drawn = DrawMatrix(g, mbox, m,
-            keepSquare: symbology is "qr" or "datamatrix" or "aztec" or "rmqr");
+            keepSquare: symbology is "qr" or "datamatrix" or "aztec" or "rmqr", dotPitch: dotPitch);
         if (withLogo) DrawQrLogo(g, drawn, m.GetLength(0), logo!, baseDir, logoScale);
         return true;
     }
@@ -453,24 +460,36 @@ public static class LabelRenderer
     /// rendering; otherwise the matrix stretches to the box (pdf417 rows
     /// get their height from the box, per spec row height is free).
     /// Returns the rect actually drawn.</summary>
-    public static RectD DrawMatrix(Graphics g, RectD box, bool[,] m, bool keepSquare)
+    public static RectD DrawMatrix(Graphics g, RectD box, bool[,] m, bool keepSquare, double dotPitch = 0)
     {
         int mh = m.GetLength(0), mw = m.GetLength(1);
         double sx = box.W / mw, sy = box.H / mh;
         if (keepSquare) sx = sy = Math.Min(sx, sy);
+        if (dotPitch > 0)   // whole dots per module (never below one), origin on the grid
+        {
+            sx = SnapModule(sx, dotPitch, sx);
+            sy = keepSquare ? sx : SnapModule(sy, dotPitch, sy);
+        }
         double ox = box.X + (box.W - mw * sx) / 2;
         double oy = box.Y + (box.H - mh * sy) / 2;
-        for (int y = 0; y < mh; y++)
-            for (int x = 0; x < mw; x++)
-            {
-                if (!m[y, x]) continue;
-                int x2 = x;
-                while (x2 + 1 < mw && m[y, x2 + 1]) x2++;
-                g.FillRectangle(Brushes.Black,
-                    (float)(ox + x * sx), (float)(oy + y * sy),
-                    (float)((x2 - x + 1) * sx), (float)sy);
-                x = x2;
-            }
+        if (dotPitch > 0) { ox = SnapDot(ox, dotPitch); oy = SnapDot(oy, dotPitch); }
+        var smooth = g.SmoothingMode;
+        if (dotPitch > 0) g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;   // see DrawBars
+        try
+        {
+            for (int y = 0; y < mh; y++)
+                for (int x = 0; x < mw; x++)
+                {
+                    if (!m[y, x]) continue;
+                    int x2 = x;
+                    while (x2 + 1 < mw && m[y, x2 + 1]) x2++;
+                    g.FillRectangle(Brushes.Black,
+                        (float)(ox + x * sx), (float)(oy + y * sy),
+                        (float)((x2 - x + 1) * sx), (float)sy);
+                    x = x2;
+                }
+        }
+        finally { g.SmoothingMode = smooth; }
         return new(ox, oy, mw * sx, mh * sy);
     }
 
@@ -736,19 +755,54 @@ public static class LabelRenderer
 
     /// <summary>Fill-the-box: modules scale so the symbol spans the whole
     /// rect (same rule as labelprint / the convention).</summary>
-    public static void DrawBars(Graphics g, RectD box, int[] mods)
+    public static void DrawBars(Graphics g, RectD box, int[] mods, double dotPitch = 0)
     {
         int total = 0;
         foreach (var m in mods) total += m;
         double mw = box.W / total;
         double x = box.X;
-        for (int i = 0; i < mods.Length; i++)
+        if (dotPitch > 0)
         {
-            double next = x + mods[i] * mw;
-            if (i % 2 == 0) // even index = bar
-                g.FillRectangle(Brushes.Black,
-                    (float)x, (float)box.Y, (float)(next - x), (float)box.H);
-            x = next;
+            // dot-snapped: module = whole dots (never below one), symbol
+            // centered in the box on the dot grid, height to whole dots —
+            // the raster transport's equivalent of the driver-path rule
+            // "barcodes drawn module-snapped and un-antialiased"
+            mw = SnapModule(mw, dotPitch, box.W / total);
+            x = SnapDot(box.X + (box.W - total * mw) / 2, dotPitch);
+            double y0 = SnapDot(box.Y, dotPitch);
+            double h = Math.Max(dotPitch, Math.Round(box.H / dotPitch) * dotPitch);
+            box = new RectD(x, y0, total * mw, h);
         }
+        // dot-snapped fills are HARD-EDGED: no anti-aliasing, so every
+        // edge is decided by the same pixel-center rule and every module
+        // is exactly its dot count whatever the fractional origin
+        var smooth = g.SmoothingMode;
+        if (dotPitch > 0) g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+        try
+        {
+            for (int i = 0; i < mods.Length; i++)
+            {
+                double next = x + mods[i] * mw;
+                if (i % 2 == 0) // even index = bar
+                    g.FillRectangle(Brushes.Black,
+                        (float)x, (float)box.Y, (float)(next - x), (float)box.H);
+                x = next;
+            }
+        }
+        finally { g.SmoothingMode = smooth; }
+    }
+
+    /// <summary>Nearest multiple of the dot pitch (world units).</summary>
+    private static double SnapDot(double v, double pitch) => Math.Round(v / pitch) * pitch;
+
+    /// <summary>Module → whole dots: NEAREST (a 4.88-dot module prints as
+    /// 5, not 4 — flooring shrank symbols by up to a dot per module), never
+    /// below one dot; rounds DOWN only when rounding up would overrun the
+    /// box by more than 2 % (`fit` = the module size that exactly fills it).</summary>
+    private static double SnapModule(double m, double pitch, double fit)
+    {
+        double dots = Math.Max(1, Math.Round(m / pitch));
+        if (dots * pitch > fit * 1.02 && dots > 1) dots -= 1;
+        return dots * pitch;
     }
 }
